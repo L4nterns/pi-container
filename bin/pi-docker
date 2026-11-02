@@ -83,6 +83,17 @@ case "${1:-}" in
         "${CURRENT[@]}" build --no-cache pi "$@"
         exit $?
         ;;
+    recreate)
+        if (( $# != 1 )); then printf '用法：pi recreate\n' >&2; exit 2; fi
+        ;;
+    "")
+        if (( $# )); then printf '无参数时启动 Pi；不支持空命令\n' >&2; exit 2; fi
+        ;;
+    shell|root-shell) ;;
+    *)
+        printf '未知命令：%s\n' "$1" >&2
+        exit 2
+        ;;
 esac
 
 if [[ "$WORKDIR" == / ]]; then
@@ -124,10 +135,6 @@ if [[ -n "$VIBE_DIR" || -n "$VIBE_URL" ]]; then
         exit 1
     fi
     VIBE_DIR=$(realpath -e -- "$VIBE_DIR")
-    if [[ "$VIBE_DIR" == "$WORKDIR" || "$VIBE_DIR" == "$WORKDIR/"* || "$WORKDIR" == "$VIBE_DIR/"* ]]; then
-        printf '发布目录不能与当前工作目录重叠\n' >&2
-        exit 1
-    fi
     export VIBE_PROJECTS_HOST_DIR="$VIBE_DIR"
     export VIBE_PUBLIC_URL="$VIBE_URL"
     COMPOSE+=(--file "$REPO/compose.vibe.yaml")
@@ -172,14 +179,12 @@ case "${1:-}" in
         "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --env HOME=/root --workdir /workspace pi bash "$@"
         ;;
     recreate)
-        shift
-        if (( $# )); then printf '用法：pi-docker recreate\n' >&2; exit 2; fi
         "${COMPOSE[@]}" up -d --force-recreate --no-build pi
         ;;
-    *)
+    "")
         "${COMPOSE[@]}" up -d --no-recreate pi >&2
         trap finish_session EXIT
         "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi \
-            /usr/local/bin/pi-entrypoint "$@"
+            /usr/local/bin/pi-entrypoint
         ;;
 esac

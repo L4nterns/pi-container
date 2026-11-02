@@ -70,18 +70,19 @@ function checkFileName(name, isDirectory) {
   }
 }
 
-async function copyValidated(source, target) {
+async function copyValidated(source, target, excluded) {
   const items = await fs.readdir(source, { withFileTypes: true });
   for (const item of items) {
     const src = path.join(source, item.name);
     const dest = path.join(target, item.name);
     const st = await fs.lstat(src);
     if (st.isSymbolicLink()) fail(`拒绝发布符号链接：${src}`);
+    if (excluded.has(`${st.dev}:${st.ino}`)) continue;
     checkFileName(item.name, st.isDirectory());
     if (st.isDirectory()) {
       await fs.mkdir(dest, { mode: 0o755 });
       await fs.chmod(dest, 0o755); // 避免严格的文件创建掩码阻止网站服务读取静态资源。
-      await copyValidated(src, dest);
+      await copyValidated(src, dest, excluded);
     } else if (st.isFile()) {
       await fs.copyFile(src, dest);
       await fs.chmod(dest, 0o644);
@@ -100,10 +101,6 @@ async function main() {
   await verifyPublishMount();
   const workspace = await fs.realpath(SOURCE_ROOT);
   const publicRoot = await fs.realpath(PUBLIC_ROOT);
-  if (workspace === publicRoot || inside(workspace, publicRoot) || inside(publicRoot, workspace)) {
-    fail('源码根目录和发布根目录必须独立，不能相互包含');
-  }
-
   const src = await fs.realpath(path.resolve(sourceArg));
   if (!inside(workspace, src)) fail(`静态文件目录必须位于 ${workspace} 内：${src}`);
   const srcSt = await fs.stat(src);
@@ -142,9 +139,10 @@ async function main() {
     }
     stage = await fs.mkdtemp(path.join(privateDir, `${slug}.stage-`));
     await fs.chmod(stage, 0o755);
-    await copyValidated(src, stage);
-
     const before = await statMaybe(target);
+    const excluded = new Set([rootStat, await fs.stat(privateDir), before].filter(Boolean).map(st => `${st.dev}:${st.ino}`));
+    await copyValidated(src, stage, excluded);
+
     if (before) {
       if (before.isSymbolicLink() || !before.isDirectory()) {
         fail(`发布目标不是普通目录，拒绝覆盖：${target}`);
