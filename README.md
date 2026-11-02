@@ -1,6 +1,6 @@
 # Pi Coding Agent · Docker
 
-使用 Docker Compose 运行 [Pi Coding Agent](https://github.com/earendil-works/pi)，自动安装 [pi-provider-newapi](https://github.com/ttimasdf/pi-provider-newapi)，通过 NewAPI 发现和选择模型，无须手动维护模型列表。
+使用 Docker Compose 运行 [Pi Coding Agent](https://github.com/earendil-works/pi)，自动安装 [pi-provider-newapi](https://github.com/L4nterns/pi-provider-newapi)，通过 NewAPI 发现和选择模型，无须手动维护模型列表。
 
 `pi` 命令从**当前目录**启动容器中的 Pi：每个宿主机项目使用独立、可复用的容器；Pi 配置、凭据和插件共享保存在宿主机。集成了 Bash 提示符美化、大小写不敏感补全和可选的静态网站发布技能。
 
@@ -156,4 +156,4 @@ Pi 进程和普通 `pi shell` 使用执行 `pi` 的宿主机 UID/GID，避免项
 ## 相关项目
 
 - [Pi Coding Agent](https://github.com/earendil-works/pi)
-- [pi-provider-newapi](https://github.com/ttimasdf/pi-provider-newapi)
+- [pi-provider-newapi](https://github.com/L4nterns/pi-provider-newapi)

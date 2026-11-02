@@ -2,8 +2,8 @@
 set -eu
 
 AGENT_DIR="/home/node/.pi/agent"
-PLUGIN='npm:pi-provider-newapi'
-MARKER="$AGENT_DIR/.docker-newapi-plugin-installed"
+PLUGIN='git:github.com/L4nterns/pi-provider-newapi'
+MARKER="$AGENT_DIR/.docker-newapi-fork-installed"
 
 case "${PUID:-}:${PGID:-}" in
     *[!0-9:]*|:*|*:) echo '[Pi] PUID/PGID 不合法' >&2; exit 1 ;;
@@ -25,9 +25,13 @@ fi
 exec 9>"$AGENT_DIR/.docker-newapi.lock"
 flock 9
 if [ ! -f "$MARKER" ]; then
-    echo '[Pi] 正在首次安装 pi-provider-newapi...'
+    echo '[Pi] 正在安装 L4nterns/pi-provider-newapi...'
     setpriv --reuid "$PUID" --regid "$PGID" --groups "$PI_GROUPS" \
         pi install "$PLUGIN"
+    if [ -f "$AGENT_DIR/.docker-newapi-plugin-installed" ]; then
+        setpriv --reuid "$PUID" --regid "$PGID" --groups "$PI_GROUPS" \
+            pi remove npm:pi-provider-newapi
+    fi
     setpriv --reuid "$PUID" --regid "$PGID" --groups "$PI_GROUPS" \
         touch "$MARKER"
 fi
