@@ -6,3 +6,5 @@ services:
       - type: bind
         source: ${VIBE_PROJECTS_HOST_DIR:?需要在 .env 中配置}
         target: /vibe-projects
+        bind:
+          create_host_path: false

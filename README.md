@@ -1,58 +1,41 @@
 # Pi Coding Agent · Docker
 
-使用 Docker Compose 运行 [Pi Coding Agent](https://github.com/earendil-works/pi)，自动安装 [pi-provider-newapi](https://github.com/L4nterns/pi-provider-newapi)，通过 NewAPI 发现和选择模型，无须手动维护模型列表。
+从当前项目目录运行容器化的 [Pi Coding Agent](https://github.com/earendil-works/pi)，内置 [NewAPI provider](https://github.com/L4nterns/pi-provider-newapi) 和可选的静态网站发布技能。
 
-`pi` 命令从**当前目录**启动容器中的 Pi：每个宿主机项目使用独立、可复用的容器；Pi 配置、凭据和插件共享保存在宿主机。集成了 Bash 提示符美化、大小写不敏感补全和可选的静态网站发布技能。
+- 每个项目使用独立、可复用的容器，当前目录挂载为 `/workspace`。
+- Pi 设置、登录凭据和扩展在同一安装目录下共享，会话按项目分别保存。
+- 最后一个会话退出后停止容器，不删除容器内临时安装的工具。
+- 不授予容器 Docker 权限，不托管持久运行的动态网站。
 
 ## 环境要求
 
-- Linux（支持 Bash、`readlink`、`realpath`、`sha256sum`、`id` 等常见命令）
-- Docker Engine / Docker Desktop、Docker Compose v2
-- 当前账号有运行 Docker 的权限
+- Linux、Bash 4.1+、GNU coreutils 和 util-linux 的 `flock`。
+- 本机 Docker Engine、Docker Compose v2（支持 `config --environment`）。
+- 当前用户有 Docker 权限，仓库目录和项目目录可写。
 
-容器基础镜像为 `node:24-trixie-slim`，不依赖 WSL 或特定 Linux 发行版。Windows 上可以在 WSL 的 Linux 环境中运行，但当前启动脚本不是 Windows 原生 PowerShell 程序。
+Windows 可通过 WSL 的 Linux 环境使用；不支持原生 PowerShell 启动或远程 Docker daemon。共享此安装目录的项目应属于同一个受信任的用户，不能作为多用户或不可信代码的安全沙箱。
 
-## 安装
-
-克隆仓库并创建全局命令（以下示例使用 `~/pi-docker`）：
+## 安装与使用
 
 ```bash
+git clone https://github.com/L4nterns/pi-docker.git ~/pi-docker
 cd ~/pi-docker
-sudo ln -s "$(pwd -P)/bin/pi-docker" /usr/local/bin/pi
-```
-
-不想使用管理员权限，可以安装到自己的 `~/.local/bin`，并确保它已加入 `PATH`：
-
-```bash
 mkdir -p ~/.local/bin
 ln -s "$(pwd -P)/bin/pi-docker" ~/.local/bin/pi
 ```
 
-工具会从软链接找到仓库根目录，仓库移动后需要重新创建链接。首次运行时自动构建镜像，并在宿主机仓库下创建 `data/` 目录。无需安装 GNU Make。
+确保 `~/.local/bin` 已加入 `PATH`。如该位置已有 `pi` 命令，先确认用途，不要直接覆盖。也可以将链接创建到 `/usr/local/bin/pi`（需要管理员权限）。
 
-## 快速开始
-
-在**想让 Pi 工作的目录**直接执行：
+在要工作的项目目录运行：
 
 ```bash
 cd ~/projects/my-app
 pi
 ```
 
-或者：
+首次运行自动构建镜像、创建 `data/` 并安装 provider。后续运行复用该项目容器。禁止从宿主机根目录 `/` 启动；从用户主目录等上层目录启动也会扩大文件访问范围，请使用具体项目目录。
 
-```bash
-cd /srv/another-project
-pi
-```
-
-当前宿主机目录会被挂载为容器的 `/workspace`。不同目录使用不同容器和独立的项目会话目录；相同目录再次运行会复用容器。为避免误暴露整台宿主机，不允许直接从根目录 `/` 启动。
-
-Pi 正常退出（包括 `/quit`）后，如果当前项目没有其他活动的容器交互会话，`pi` 会自动**停止但不删除**该容器；下次运行时重新启动并复用已有容器，APT 安装的工具仍保留。若同一项目还有其他活动的 `docker exec` 会话，则不会自动停止，以免打断其他终端。**不同项目容器并不共享这些临时安装的软件**；需要所有项目都有的工具请加入 Dockerfile 再重新构建镜像。
-
-## 配置 NewAPI
-
-在 Pi 内执行：
+Pi 内配置 NewAPI：
 
 ```text
 /newapi-provider-add newapi
@@ -60,100 +43,96 @@ Pi 正常退出（包括 `/quit`）后，如果当前项目没有其他活动的
 /model
 ```
 
-填写 NewAPI 网关地址（例如 `https://api.example.com`，不含 `/v1`）和 API Key，再选择模型。模型由插件发现；少数未知模型可能需要补充元数据。
+填写网关根地址（如 `https://api.example.com`，不含 `/v1`）和 API Key。协议覆盖等高级选项见 [provider 文档](https://github.com/L4nterns/pi-provider-newapi)；容器内配置位置是 `/home/node/.pi/agent/extension-settings/provider-newapi.json`。
 
-如果模型错误使用 `/v1/responses` 返回 404，而网关仅支持 `/v1/chat/completions`，在仓库的 `data/extension-settings/provider-newapi.json` 中对应 Provider 的配置对象内增加：
-
-```json
-"modelApiOverrides": {
-  "^your-model-id$": "openai-completions"
-}
-```
-
-替换为实际模型 ID（正则特殊字符需要转义），保存后重启 Pi 并使用 `/model` 刷新模型目录。
-
-## 常用命令
-
-以下命令均在**当前宿主机目录对应的项目容器**中操作：
+## 命令
 
 | 命令 | 用途 |
 | --- | --- |
-| `pi` | 启动或进入当前项目的 Pi |
-| `pi shell` | 以宿主机 UID/GID 进入普通 Bash |
-| `pi root-shell` | 进入 root Bash，仅用于容器管理和安装工具 |
-| `pi stop` | 手动停止当前项目容器，保留容器可写层（通常无需执行） |
-| `pi down` | 删除当前项目容器和 Compose 网络 |
-| `pi down -a`（等价于 `pi down --all`） | 删除本仓库创建的全部项目容器及对应网络 |
-| `pi ps` | 查看本仓库的项目容器（包括已停止的） |
-| `pi build` | 构建共享镜像，不替换已创建的容器 |
-| `pi rebuild` | 无缓存重新构建共享镜像 |
-| `pi recreate` | 用现有镜像重建当前项目容器 |
+| `pi` | 在当前项目启动 Pi |
+| `pi shell` | 以宿主机 UID/GID 进入 Bash |
+| `pi root-shell` | 进入 root Bash，用于安装工具和管理容器内部 |
+| `pi stop` | 停止当前项目容器，保留可写层 |
+| `pi down` | 删除当前项目容器和网络 |
+| `pi down --all`（或 `-a`） | 删除当前用户在此安装目录创建的全部项目容器和网络 |
+| `pi ps` | 列出此安装目录创建的项目容器 |
+| `pi build [构建参数...]` | 构建镜像，不替换容器 |
+| `pi rebuild [构建参数...]` | 无缓存构建镜像 |
+| `pi recreate` | 用已构建的镜像重建当前项目容器 |
+| `pi --help` | 显示命令用法 |
 
-`pi down` 应在要清理的项目目录运行；`pi ps` 和 `pi down -a`（或 `--all`）可在任意目录运行。`down -a` 和 `down --all` 仅匹配此仓库路径下、名称符合本项目规则的 Compose 容器。直接在仓库里运行 `docker compose down` 既缺少动态变量，也不会使用各项目的 Compose 项目名，因此不应使用。
+`pi shell`、`pi root-shell` 接受 Bash 参数，例如 `pi shell -c 'node --version'`。包装器不直接透传 Pi 参数；需要时可在 `pi shell` 中运行 `pi --help`、`pi --continue` 等原生命令。
 
-镜像更新后，需要对要更新的项目分别执行 `pi recreate`。重新创建或删除容器会丢失其**未挂载的可写层**，包括通过 APT 临时安装的软件，但不会删除宿主机项目文件和仓库中的 `data/`。
+通过包装器打开的同项目会话可并发使用。启动、退出和维护操作由宿主机文件锁协调；有活动会话时 `stop`、`recreate`、`down` 会拒绝操作。原始 `docker exec` 不参与会话锁，不应与这些维护命令混用。终端异常断开后可用 `pi ps` 核对并用 `pi stop` 停止闲置容器。
 
-Pi 的默认设置、登录凭据及扩展位于仓库 `data/`。项目会话通过宿主机目录的哈希分别保存在 `data/project-sessions/` 下，避免不同项目都使用容器路径 `/workspace` 时混合会话。
+容器不会共享临时安装的软件。需要所有项目都有的工具应加入 Dockerfile，执行 `pi build`，再在相应项目目录执行 `pi recreate`。**重建或删除容器会丢失未挂载的可写层**，但不删除项目文件、`data/` 或发布目录。
 
-## 卸载与清理
+## 数据与权限
 
-清理当前项目：在该项目目录执行 `pi down`。清理此仓库管理的全部项目容器：在任意目录执行 `pi down -a`；先用 `pi ps` 核对清理范围。两者都不会删除仓库的 `data/`、宿主机工作目录或静态网站发布目录。
+| 宿主机路径 | 容器路径 / 用途 |
+| --- | --- |
+| 启动时的当前目录 | `/workspace`，读写 |
+| 仓库 `data/` | `/home/node/.pi/agent`，共享设置、凭据和扩展 |
+| 仓库 `data/project-sessions/<UID>-<项目哈希>/` | 当前项目的 Pi 会话 |
+| 仓库 `.runtime/` | 宿主机侧会话锁，不挂载进容器 |
+| 可选发布目录 | `/vibe-projects`，读写 |
 
-彻底卸载时，先执行 `pi down --all`，再删除指向本仓库的全局命令软链接：
+项目和安装目录使用规范化绝对路径识别；移动目录会改变项目标识。Pi 和普通 Shell 使用宿主机 UID/GID 及附加组；`root-shell` 使用 `/root` 作为 HOME。容器常驻进程保留 root 以支持权限初始化和安装工具，但普通 Pi 会话会降权。不要使用 `sudo pi` 作为日常工作方式。
 
-```bash
-# 使用哪一种安装位置，就执行相应命令；删除前确认确实是本仓库的链接
-readlink -f /usr/local/bin/pi
-sudo rm /usr/local/bin/pi
-# 或：rm ~/.local/bin/pi
-```
-
-可按需删除共享镜像：
-
-```bash
-docker image rm pi-docker:local
-```
-
-最后仅在确认不再需要登录配置、会话和项目记录时删除仓库目录，其中 `data/` 保存这些持久化内容。用户自己的项目目录以及 `VIBE_PROJECTS_HOST_DIR` 所指向的静态网站目录均应单独管理，卸载不会自动清理。
-
-## Bash 体验
-
-容器内的交互式 Bash 配置了两行彩色提示符，同时启用 Readline 的 `set completion-ignore-case on`，文件名补全不区分大小写。通过 `pi shell` 使用；它不改变 Pi 自身的界面和宿主机的 Bash 设置。
+同一安装目录的所有项目可以读取共享登录凭据并修改共享扩展；启用发布后也能写入整个发布目录。这是**受信任的个人开发环境**，不是站点级或项目级权限隔离。需要不同信任边界时使用不同安装目录、发布目录和凭据。详见 [SECURITY.md](SECURITY.md)。
 
 ## 静态网站发布
 
-项目内置可选的 `vibe-projects` 技能，用于将当前项目的静态构建产物发布到网站目录。技能文件位于 `skills/vibe-projects/`。
+默认不启用发布技能。需要先配置一个独立的静态 Web 服务器，本工具不会安装 Nginx、配置 DNS 或自动取得 TLS 证书。
 
-默认不加载此技能，也不挂载发布目录。在仓库的 `.env` 中配置以下两项即可启用：
+在工具仓库内复制配置并填写两项：
+
+```bash
+cp .env.example .env  # 已有 .env 时直接编辑，不要覆盖
+```
 
 ```dotenv
 VIBE_PROJECTS_HOST_DIR=/srv/vibe-projects
 VIBE_PUBLIC_URL=https://example.com
 ```
 
-启用后，Pi 会自动加载 `vibe-projects` 技能，可通过 `/skill:vibe-projects` 使用。未启用时，该内置技能不会出现在 Pi 的技能列表中，不影响其他普通 Skills 的自动发现。
+发布目录必须已存在、对当前用户可写，与项目目录及 Pi 配置数据分离。外部 Web 服务器应将其作为静态站点根目录；关闭目录列表，禁止访问 `.publish-internal` 等隐藏路径，不要将此目录配置为 PHP 等服务端脚本执行目录。
 
-`VIBE_PROJECTS_HOST_DIR` 必须是宿主机上**已存在、可写**的**绝对路径**；静态 Web 服务器应将对应目录用作站点根目录。
-
-更改配置后，进入需要发布的网站项目目录，执行 `pi recreate` 更新该项目容器的挂载及环境变量。如果修改了 Dockerfile 或入口脚本，需要先执行 `pi build`，再执行 `pi recreate`。
-
-技能依据项目实际构建流程确认要发布的静态目录，发布脚本必须显式传入该目录。可在容器中手动调用，例如：
+配置后在要发布的项目目录执行 `pi recreate`。启用的项目可使用 `/skill:vibe-projects`，也可在容器内显式调用：
 
 ```bash
-node /opt/pi-docker/skills/vibe-projects/scripts/publish.mjs demo /workspace/构建产物目录
+node /opt/pi-docker/skills/vibe-projects/scripts/publish.mjs demo /workspace/已核实的构建目录
 ```
 
-脚本会检查静态目录和独立发布挂载，然后把文件复制到 `/vibe-projects/demo/`，输出网址。只发布静态网站，不要公开服务端程序、密钥、环境文件或整个源码仓库。公网可能有 Cloudflare 质询，因此本地复制成功不等于公网 HTTP 检查一定成功。
+产物发布到 `/vibe-projects/demo/`，网址为 `VIBE_PUBLIC_URL/demo/`。域名和服务器持续可用时，Pi 容器退出不会影响已发布文件。
 
-## 路径与权限
+发布前必须完成构建和人工审查，只选择静态产物，不发布源码仓库、依赖、环境文件、凭据或源码映射。脚本拒绝常见危险文件、符号链接和高置信度凭据特征；疑似凭据字段和错误资源前缀会产生提醒，扫描不能替代安全审查。
 
-每个容器只挂载当前项目目录为 `/workspace`，并共享仓库中的 `data/`；若启用发布功能，还会挂载公共发布目录。**工作目录分开不等于完整的安全沙箱**：Pi 仍有项目目录的读写权限和共享的 API 凭据；`root-shell` 仍可获取容器内 root 权限。
+资源需适用于 `/demo/` 子路径。无 SPA 回退配置时使用哈希路由。脚本先复制并检查私有暂存区，再替换站点；两次目录重命名间可能有短暂空窗，不保留历史版本。异常中断后先检查输出和暂存锁，不要在仍有发布进程时删除锁。复制成功不等于公网验证成功，应检查项目 URL 和关键资源，而不是域名根路径。
 
-Pi 进程和普通 `pi shell` 使用执行 `pi` 的宿主机 UID/GID，避免项目文件被意外创建为 root 所有。`pi root-shell` 专供管理用途，并使用 `/root` 作为 HOME，避免 root 的 npm 操作污染普通用户缓存。建议使用普通宿主机账号，并只在具体项目目录执行；如果从用户主目录等上层目录启动，该目录下的凭据和其他文件也可能被 Pi 访问。
+## 构建与检查
 
-本仓库的 `.env`、`data/` 均应保留在宿主机，不要提交到 Git。Dockerfile 使用清华 TUNA Debian 镜像和 [npmmirror](https://npmmirror.com/) 加速安装；基础镜像拉取失败时请检查 Docker 代理配置。
+同一安装目录的项目共用该安装独立的本地镜像标签，不同安装目录的构建不会互相覆盖。Node 基础镜像锁定摘要，Pi 的 npm 依赖由 `package-lock.json` 固定，provider 锁定 Git 提交；系统软件包仍从 Debian 安全维护源安装。默认使用官方软件源，npm 网络受限时可指定：
 
-## 相关项目
+```bash
+pi build --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+```
 
-- [Pi Coding Agent](https://github.com/earendil-works/pi)
-- [pi-provider-newapi](https://github.com/L4nterns/pi-provider-newapi)
+本地检查需要 Node.js 24、Bash、`flock`，建议安装 ShellCheck：
+
+```bash
+bash scripts/check.sh
+bash tests/docker-smoke.sh  # 另需本机 Docker，构建临时测试镜像
+```
+
+CI 执行脚本检查、隔离回归测试、Compose 配置解析和容器冒烟测试。测试使用临时目录，不发布真实站点。
+
+## 清理
+
+在项目目录执行 `pi down`；清理当前用户在本安装目录创建的所有项目，先用 `pi ps` 确认，再执行 `pi down --all`。这些操作均保留宿主机项目文件、`data/` 和静态发布文件。
+
+卸载时退出会话、清理容器，再核对并删除安装时创建的 `pi` 软链接。仓库 `data/` 含凭据和会话记录，只在确认不再需要后删除；发布目录由用户单独管理。`.env`、`data/`、`.runtime/` 已从 Git 和 Docker 构建上下文排除。
+
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE)。第三方依赖遵循各自的许可证。

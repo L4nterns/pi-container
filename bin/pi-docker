@@ -3,23 +3,38 @@ set -euo pipefail
 
 SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
 REPO=$(cd -- "$(dirname -- "$SCRIPT")/.." && pwd -P)
+# shellcheck source=lib/session-lifecycle.sh
+source "$REPO/lib/session-lifecycle.sh"
 WORKDIR=$(pwd -P)
 UID_VALUE=$(id -u)
 HASH=$(printf '%s' "$WORKDIR" | sha256sum | cut -c1-16)
-PROJECT="pi-u${UID_VALUE}-${HASH}"
+REPO_HASH=$(printf '%s' "$REPO" | sha256sum | cut -c1-8)
+PROJECT="pi-r${REPO_HASH}-u${UID_VALUE}-${HASH}"
 
+# All projects in this checkout share one image, but other checkouts cannot
+# overwrite it. Always derive the tag here for build, start and recreate alike.
+export PI_DOCKER_IMAGE="pi-docker:r${REPO_HASH}"
 export PI_WORKSPACE="$WORKDIR"
 export PUID="$UID_VALUE"
-export PGID="$(id -g)"
-export PI_GROUPS="$(id -G | tr ' ' ',')"
+PGID=$(id -g)
+PI_GROUPS=$(id -G | tr ' ' ',')
+export PGID PI_GROUPS
 export PI_SESSION_DIR="/home/node/.pi/agent/project-sessions/${UID_VALUE}-${HASH}"
 
-# 维护命令不依赖可选的发布配置，因此即使 .env 被删除也能清理容器。
+# Maintenance commands do not depend on optional publishing settings.
 CORE=(docker compose --project-directory "$REPO" \
     --file "$REPO/compose.yaml" --env-file "$REPO/.env.example")
 CURRENT=("${CORE[@]}" --project-name "$PROJECT")
 
-# 只识别此安装目录创建、且项目名符合 pi-docker 规则的 Compose 容器。
+usage() {
+    printf '%s\n' '用法：pi [shell [Bash 参数...]|root-shell [Bash 参数...]|stop|down [--all]|ps|build [构建参数...]|rebuild [构建参数...]|recreate]'
+}
+
+init_lifecycle() {
+    session_lifecycle_init "$REPO/.runtime/$PROJECT"
+}
+
+# Only recognize this checkout, user and project-name scheme.
 managed_projects() {
     local ids id name
     ids=$(docker ps -aq \
@@ -28,15 +43,19 @@ managed_projects() {
     while IFS= read -r id; do
         [[ -n "$id" ]] || continue
         name=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$id") || return
-        [[ "$name" =~ ^pi-u[0-9]+-[0-9a-f]{16}$ ]] || continue
+        [[ "$name" =~ ^pi-r${REPO_HASH}-u${UID_VALUE}-[0-9a-f]{16}$ ]] || continue
         printf '%s\n' "$name"
     done <<< "$ids"
 }
 
 case "${1:-}" in
+    --help|-h)
+        usage
+        exit 0
+        ;;
     ps)
         shift
-        if (( $# )); then printf '用法：pi-docker ps\n' >&2; exit 2; fi
+        if (( $# )); then usage >&2; exit 2; fi
         projects=$(managed_projects | sort -u)
         if [[ -z "$projects" ]]; then
             printf '没有此安装目录创建的项目容器。\n'
@@ -50,48 +69,52 @@ case "${1:-}" in
     down)
         shift
         if (( $# == 0 )); then
-            "${CURRENT[@]}" down --remove-orphans
+            init_lifecycle
+            session_require_idle "${CURRENT[@]}" down --remove-orphans
         elif (( $# == 1 )) && [[ "$1" == --all || "$1" == -a ]]; then
             projects=$(managed_projects | sort -u)
+            status=0
             if [[ -z "$projects" ]]; then
                 printf '没有需要清理的项目容器。\n'
             else
                 while IFS= read -r name; do
                     printf '清理 Compose 项目：%s\n' "$name"
-                    "${CORE[@]}" --project-name "$name" down --remove-orphans
+                    session_lifecycle_init "$REPO/.runtime/$name"
+                    session_require_idle "${CORE[@]}" --project-name "$name" down --remove-orphans || status=1
                 done <<< "$projects"
             fi
+            exit "$status"
         else
-            printf '用法：pi-docker down [-a|--all]\n' >&2
+            usage >&2
             exit 2
         fi
         exit 0
         ;;
     stop)
         shift
-        if (( $# )); then printf '用法：pi-docker stop\n' >&2; exit 2; fi
-        "${CURRENT[@]}" stop pi
+        if (( $# )); then usage >&2; exit 2; fi
+        init_lifecycle
+        session_require_idle "${CURRENT[@]}" stop pi
         exit 0
         ;;
-    build)
+    build|rebuild)
+        command=$1
         shift
-        "${CURRENT[@]}" build pi "$@"
-        exit $?
-        ;;
-    rebuild)
-        shift
-        "${CURRENT[@]}" build --no-cache pi "$@"
-        exit $?
+        build_flags=()
+        if [[ "$command" == rebuild ]]; then build_flags+=(--no-cache); fi
+        "${CURRENT[@]}" build "${build_flags[@]}" "$@" pi
+        exit 0
         ;;
     recreate)
-        if (( $# != 1 )); then printf '用法：pi recreate\n' >&2; exit 2; fi
+        if (( $# != 1 )); then usage >&2; exit 2; fi
         ;;
     "")
-        if (( $# )); then printf '无参数时启动 Pi；不支持空命令\n' >&2; exit 2; fi
+        if (( $# )); then usage >&2; exit 2; fi
         ;;
     shell|root-shell) ;;
     *)
         printf '未知命令：%s\n' "$1" >&2
+        usage >&2
         exit 2
         ;;
 esac
@@ -102,89 +125,88 @@ if [[ "$WORKDIR" == / ]]; then
 fi
 
 ENV_FILE="$REPO/.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-    ENV_FILE="$REPO/.env.example"
-fi
-
-# 从工具仓库读取发布配置，而不是从当前项目的 .env 中读取。
-read_env_value() {
-    local key="$1" result
-    result=$(sed -n -E "s/^${key}=[[:space:]]*//p" "$ENV_FILE" | tail -n 1)
-    result=${result%$'\r'}
-    result=${result%\"}; result=${result#\"}
-    result=${result%\'}; result=${result#\'}
-    printf '%s' "$result"
-}
-
-VIBE_DIR="${VIBE_PROJECTS_HOST_DIR:-$(read_env_value VIBE_PROJECTS_HOST_DIR)}"
-VIBE_URL="${VIBE_PUBLIC_URL:-$(read_env_value VIBE_PUBLIC_URL)}"
+if [[ ! -f "$ENV_FILE" ]]; then ENV_FILE="$REPO/.env.example"; fi
 COMPOSE=(docker compose --project-directory "$REPO" --project-name "$PROJECT" \
     --file "$REPO/compose.yaml" --env-file "$ENV_FILE")
+
+# Let Compose parse dotenv once, instead of maintaining a second, incompatible parser.
+# The resolved values are then validated and exported for all subsequent commands.
+CONFIG_ENV=$("${COMPOSE[@]}" config --environment)
+read_config_value() {
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" == "$1="* ]]; then printf '%s' "${line#*=}"; return; fi
+    done <<< "$CONFIG_ENV"
+}
+VIBE_DIR=$(read_config_value VIBE_PROJECTS_HOST_DIR)
+VIBE_URL=$(read_config_value VIBE_PUBLIC_URL)
 
 if [[ -n "$VIBE_DIR" || -n "$VIBE_URL" ]]; then
     if [[ -z "$VIBE_DIR" || -z "$VIBE_URL" ]]; then
         printf '请同时设置 VIBE_PROJECTS_HOST_DIR 和 VIBE_PUBLIC_URL\n' >&2
         exit 1
     fi
-    if [[ "$VIBE_DIR" != /* ]]; then
-        printf '发布目录必须使用绝对路径：%s\n' "$VIBE_DIR" >&2
-        exit 1
-    fi
-    if [[ ! -d "$VIBE_DIR" ]]; then
-        printf '发布目录不存在：%s\n' "$VIBE_DIR" >&2
+    if [[ "$VIBE_DIR" != /* || ! -d "$VIBE_DIR" || ! -w "$VIBE_DIR" ]]; then
+        printf '发布目录必须是已存在、可写的绝对路径：%s\n' "$VIBE_DIR" >&2
         exit 1
     fi
     VIBE_DIR=$(realpath -e -- "$VIBE_DIR")
+    if [[ "$VIBE_DIR" == / || "$VIBE_DIR" == "$WORKDIR" || "$VIBE_DIR" == "$WORKDIR/"* || "$WORKDIR" == "$VIBE_DIR/"* ||
+          "$VIBE_DIR" == "$REPO" || "$REPO" == "$VIBE_DIR/"* || "$VIBE_DIR" == "$REPO/data" || "$VIBE_DIR" == "$REPO/data/"* ]]; then
+        printf '发布目录不能覆盖工作目录、工具仓库或 Pi 配置数据\n' >&2
+        exit 1
+    fi
     export VIBE_PROJECTS_HOST_DIR="$VIBE_DIR"
     export VIBE_PUBLIC_URL="$VIBE_URL"
     COMPOSE+=(--file "$REPO/compose.vibe.yaml")
 fi
 
 mkdir -p -- "$REPO/data"
+init_lifecycle
 EXEC_TTY=()
 if [[ ! -t 0 || ! -t 1 ]]; then EXEC_TTY=(-T); fi
 
-# 退出最后一个交互会话后停止容器，不删除容器的可写层。
-# 同一项目有其他活动的 docker exec 会话时不停止，避免打断其他终端。
-stop_if_idle() {
+compose_start() {
+    "${COMPOSE[@]}" up -d --no-recreate pi >&2
+}
+
+# Also preserve externally opened docker exec sessions. Leases protect wrapper
+# sessions during the up -> exec gap; ExecIDs only supplements that guarantee.
+compose_stop_if_idle() {
     local cid exec_count
     cid=$("${COMPOSE[@]}" ps -q pi 2>/dev/null) || return 0
     [[ -n "$cid" ]] || return 0
     exec_count=$(docker inspect --format '{{len .ExecIDs}}' "$cid" 2>/dev/null) || return 0
-    if [[ "$exec_count" == 0 ]]; then
-        "${COMPOSE[@]}" stop pi >&2 || true
-    fi
+    if [[ "$exec_count" == 0 ]]; then "${COMPOSE[@]}" stop pi >&2 || true; fi
 }
 
-# EXIT 钩子同时覆盖 /quit、正常退出与 pi 命令失败；保留 Pi 原始退出码。
 finish_session() {
     local status=$?
     trap - EXIT
-    stop_if_idle
+    session_finish compose_stop_if_idle
     exit "$status"
 }
 
 case "${1:-}" in
-    shell)
-        shift
-        "${COMPOSE[@]}" up -d --no-recreate pi >&2
-        trap finish_session EXIT
-        "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi \
-            /usr/local/bin/pi-entrypoint --pi-docker-shell "$@"
-        ;;
-    root-shell)
-        shift
-        "${COMPOSE[@]}" up -d --no-recreate pi >&2
-        trap finish_session EXIT
-        "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --env HOME=/root --workdir /workspace pi bash "$@"
-        ;;
     recreate)
-        "${COMPOSE[@]}" up -d --force-recreate --no-build pi
+        session_require_idle "${COMPOSE[@]}" up -d --force-recreate --no-build pi
         ;;
-    "")
-        "${COMPOSE[@]}" up -d --no-recreate pi >&2
+    *)
         trap finish_session EXIT
-        "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi \
-            /usr/local/bin/pi-entrypoint
+        session_start compose_start
+        case "${1:-}" in
+            shell)
+                shift
+                "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi \
+                    /usr/local/bin/pi-entrypoint --pi-docker-shell "$@"
+                ;;
+            root-shell)
+                shift
+                "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --env HOME=/root --workdir /workspace pi bash "$@"
+                ;;
+            "")
+                "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi /usr/local/bin/pi-entrypoint
+                ;;
+        esac
         ;;
 esac

@@ -2,8 +2,10 @@ services:
   pi:
     build:
       context: .
-    image: pi-docker:local
+    image: ${PI_DOCKER_IMAGE:?由 pi-docker 命令设置}
     init: true
+    security_opt:
+      - no-new-privileges:true
     entrypoint: ["sleep", "infinity"]
     environment:
       PUID: ${PUID:?由 pi-docker 命令设置}
@@ -14,8 +16,10 @@ services:
       - type: bind
         source: ./data
         target: /home/node/.pi/agent
+        bind:
+          create_host_path: false
       - type: bind
         source: ${PI_WORKSPACE:?由 pi-docker 命令设置}
         target: /workspace
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+        bind:
+          create_host_path: false
