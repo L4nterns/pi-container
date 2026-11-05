@@ -1,111 +1,118 @@
-# 应用部署与管理契约
+# 应用部署与运维
 
-`appctl` 是本项目提供的应用管理 CLI，不是 Pi 上游功能。通过受限 SSH 将当前项目产物发布到独立服务容器；应用以每应用独立非 root UID 运行，由监督器负责重启和恢复，不依赖开发终端、Pi 会话或开发容器。
+服务容器提供标准 Debian、SSH/SFTP、sudo、Supervisor 和 Nginx。开发容器使用 `ssh app-services`，宿主机从任意目录使用 `devctl server [Bash 参数...]`。通过标准工具安装所需运行时、执行程序、迁移数据库、排障或传输文件。
 
-## 准备产物
+## 权限与连接
 
-1. 检查构建流程、运行时和入口，不猜测输出目录。
-2. 在 `/workspace` 内准备专用部署目录，只包含运行所需内容。不要上传整个仓库、开发缓存、私钥、登录令牌、`.env`、备份或服务端数据。依赖可随产物提供，但符号链接必须在打包时转成实际文件；服务端不执行包安装脚本。
-3. 审查文件及嵌入内容。动态程序本身就是代码，自动扫描不能证明安全；协议校验不代替审查。上传期间不要修改目录。
-4. 创建 `app-deploy.json`：
-
-   ```json
-   {
-     "command": ["node", "server.mjs"],
-     "healthPath": "/health",
-     "readyTimeout": 30,
-     "env": {"APP_MODE": "public"}
-   }
-   ```
-
-`command` 是直接执行的参数数组，不经过 Shell；需要脚本时显式使用 `sh script.sh`。`healthPath` 是本地 HTTP 路径，`readyTimeout` 为 1–120 秒。所有应用遵循相同契约，包括用 HTTP 服务提供页面文件的应用。服务镜像包含 Node.js 24、Python 3、curl；其他系统依赖加入 `services/Dockerfile`，由管理员构建。
-
-保留环境变量：
-
-- `HOST=127.0.0.1`、`PORT`：监听地址与分配端口。
-- `APP_DATA_DIR`：持久业务数据目录，不随代码替换删除。
-- `HOME`、`USER`、`LOGNAME`：应用运行账号，不是管理权限边界。
-- `PATH`：服务端受控的程序搜索路径。
-
-默认 `NODE_ENV=production`；`env` 可设置应用变量，但不能覆盖上述保留变量。运行定义保存在私有部署目录，不是秘密管理系统；不输出或提交真实凭据。应用变量在降权后才加载。
-
-运行目录是可替换的产物目录，业务数据不能写在这里。进程保持前台，不自行 daemonize、`setsid` 或脱离进程组，不依赖 SSH 会话。新旧实例可能短时共存，应用须可在另一端口并行启动。
-
-## 命令
+- `deploy` 是安装共享的管理用户，所有开发项目共同管理应用，没有项目归属限制。
+- `deploy` 可通过 `sudo -n` 获得**服务容器内完整 root 权限**。这也意味着可以执行 root Shell；禁止 root SSH 登录不是容器内提权限制。
+- 应用使用独立非 root 用户，前台运行。不要使用管理用户或 root 承载应用。
+- 开发容器仍启用 no-new-privileges 并清空能力；通过 SSH 登录的是另一容器中的独立进程，不继承客户端的降权状态。服务容器不能启用该选项，否则 sudo 失效。
+- SSH 主机密钥由宿主直接登记，严格校验。不开放宿主 SSH 端口，不挂载 Docker socket，不使用 privileged。支持终端和 SFTP，禁用密码、代理及端口转发。
 
 ```bash
-appctl --help
-appctl deploy demo /workspace/deploy
-appctl list
-appctl status demo
-appctl logs demo
-appctl stop demo
-appctl start demo
-appctl restart demo
-appctl verify demo
-# 仅在用户明确同意永久删除并完成必要备份后：
-appctl delete demo --yes
+ssh app-services 'id; sudo -n id'
+scp -r /workspace/reviewed-output app-services:upload
+sftp app-services
+# 宿主机无需原项目目录或开发容器：
+devctl server -c 'sudo supervisorctl status'
 ```
 
-| 操作 | 契约 |
+`devctl shell` 与 `devctl server` 都透传 Bash 参数，而非本地 SSH 选项或隐式命令字符串：无参数进入 Shell，`-c '命令'` 执行命令，`-lc '命令'` 使用登录 Shell，`-s` 从 stdin 读取脚本。参数边界和空参数保留；正确引用变量与管道，避免在宿主意外展开。两者都传递标准输入/输出/错误并保留退出码，有终端时分配 TTY，管道和重定向时不分配。开发容器内直接使用的 `ssh app-services` 保持标准 SSH 语义。
+
+## 持久目录与环境恢复
+
+服务端持久状态位于 `/srv/app-services`：
+
+| 路径 | 用途 |
 | --- | --- |
-| `deploy <app> <目录>` | 上传新产物，内部 HTTP 和实际新网关路由通过检查后启用或替换 |
-| `list` | 列出本安装所有应用、状态、是否启用、进程是否存在及可选 URL |
-| `status <app>` | 额外探测内部 HTTP；`running` 只说明监督进程存在，健康以 `internalHealthy` 为准 |
-| `logs <app>` | 读取最多最后 64 KiB，可能从 UTF-8 字符中间截断，不持续跟随 |
-| `stop <app>` | 撤路由、持久禁用、终止进程；产物、业务数据、日志和应用名均保留 |
-| `start <app>` | 从持久运行定义启用停止的应用；已启用时只返回状态，不上传产物 |
-| `restart <app>` | 用现有产物启动候选，通过检查后切换；停止的应用也会启用 |
-| `delete <app> --yes` | 撤路由、禁用、终止进程并永久删除所有应用文件及登记，释放应用名 |
-| `verify <app>` | 仅在当前客户端请求配置的公网 URL，与服务端生命周期分开 |
+| `ssh/`、`control/` | SSH 主机密钥、宿主登记的公钥；不要手工改权限 |
+| `setup.d/*.sh` | root 所有且不可被组/其他用户写入的环境准备脚本，按文件名顺序执行 |
+| `apps/<name>/` | 应用代码、运行环境、业务数据、日志，按职责分目录 |
+| `supervisor/*.conf` | 持久进程定义 |
+| `nginx/*.conf` | 持久网关路由定义 |
 
-应用名为 1–48 位小写字母、数字及内部连字符，服务容器内全局唯一。同一安装的开发项目共享管理权限，允许跨项目调试、更新和联调；每应用 UID 只负责运行隔离。源码目录删除或搬迁不影响应用管理。宿主可从任意目录使用 `devctl apps list/status/logs/start/restart/stop/verify`（除 list 外须指定应用），无需启动开发容器。删除仍须明确授权和 `devctl apps delete <app> --yes`。没有批量清空入口；DNS 和宿主机网关配置不会因删除应用而删除。
+持久化取决于内容是否需要跨重建保留，不因为某个目录叫 HOME 就挂载。管理用户 HOME 是 `/home/deploy`，用于上传暂存和临时工作，不在持久卷内。需要保留的应用数据、运行产物、配置和密钥按用途放入上述目录；必要的管理配置/工具也应明确选择持久路径，并通过准备脚本链接或恢复。不要依赖 HOME 中的交互式改动、缓存、历史或未审查上传来恢复服务。
 
-上传限制 512 MiB、20,000 个普通文件。拒绝路径穿越、符号链接、特殊文件及 `.git`、`.ssh`、`.env`、`.deploy-keys`、`services-data` 等敏感目录；允许 `.next`、`.bin` 等运行目录。限制不证明产物内容没有秘密或恶意代码。
+安装到 `/usr`、修改 `/etc`、创建用户等写入容器可写层的操作，在**重建**后丢失；仅重启不丢失。将必要步骤记录为幂等的 `setup.d` 脚本，再执行安装。脚本必须在全新容器上也成立，恢复固定 UID/GID，不能每次随机分配，也不要递归改写已有业务数据。
 
-## 跨项目协作与联调
+用 SFTP 上传到 HOME 后，通过 sudo 审查并 `install -o root -g root -m 0700` 到临时文件，再在同目录 `mv` 成 `*.sh`。编辑脚本时不要直接覆盖正在使用的文件。共享环境变更用 `sudo flock /run/app-services/change.lock ...` 协调；该锁只协调遵守约定的操作，不是权限边界。
 
-同一安装的所有项目共享应用管理权。应用名是安装级全局名称；再次 deploy 同名应用会更新该应用，不检查源码目录归属。共同使用的应用应先协调变更，删除仍须明确授权与 `--yes`。
+启动顺序：获得持久目录独占锁 → 初始化管理身份 → 执行环境脚本 → 校验 SSH/Nginx → 启动 Supervisor。准备脚本失败会阻止启动并写出诊断，不会假称应用就绪。Supervisor/Nginx 定义必须先通过环境脚本恢复其依赖的用户和目录。
 
-开发容器可通过固定网关联调其他应用，例如 `curl -H 'Host: app-api.internal' http://app-services:8080/`。网关根据 Host 路由，不需要为每个应用添加宿主端口或 Nginx 配置；这里的内部 URL 不代表公网已验证。
+环境脚本执行任意受信任 root 代码，不是安全沙箱。网络安装可能因仓库故障失败；按应用需要固定依赖版本、校验下载来源，并保留可恢复的依赖产物。不要把每次启动都不该执行的数据库迁移或破坏性操作放入自动恢复脚本。
 
-## 就绪、状态与恢复
+## 按需准备应用
 
-候选使用新端口，经 `healthPath` 探测后切换 Nginx，并确认新请求确实到达候选端口；单凭 `nginx -t` 或 reload 返回不够。`deploy/restart` 失败保留原进程和路由；重新尝试即可，不提供历史版本管理或自动数据库回滚。
+运行时可以是 Python、Node、Java、PHP、Ruby、自包含程序或其他 Debian 可运行程序。服务镜像中的 Python 是 Supervisor/登记工具的管理依赖，不是应用语言限制。不要求应用使用同一基础镜像构建，但其产物必须兼容服务容器的架构、ABI 与系统库。需要 GPU、设备、宿主内核能力或特权的程序，须由管理员另行配置宿主环境。
 
-`status` 状态包括 `running`、`restarting`、`stopped`、`deleting`。内部就绪不是业务完整验收；应用可能在检查后崩溃。监督器会重启已启用的崩溃应用，服务容器或宿主机重启后恢复启用状态；`stop` 的应用不会自动恢复。
+1. 检查已有应用、端口、用户、运行环境和磁盘空间；不要覆盖同名应用或安装互相冲突的系统依赖。
+2. 只传输审查过的运行产物，不上传整个仓库、私钥、令牌、开发缓存、备份或服务数据。SFTP 不会替你扫描秘密或限制包大小。
+3. 建立应用独立用户和固定 UID、数据目录。应用代码和启动配置尽量由 root 管理；仅数据/缓存等必要目录授予运行用户写权限。
+4. 准备依赖和启动定义；以应用用户执行包安装脚本，不能让不受信任的应用脚本在 sudo 中运行。
+5. 先检查内部服务，再发布网关路由，最后验证真实公网与业务。
 
-`start/restart` 不重新上传，使用已保存的产物与运行定义。切换可能存在两个进程，数据库迁移、单写数据库、任务消费和其他副作用须自行协调。停止和切换时长连接可能断开，客户端应支持重连，不承诺无停机。
+### 可运行示例
 
-## 公网检查
-
-由管理员设置可选 `DEPLOY_PUBLIC_URL=https://app-{app}.example.com`，配置 DNS、TLS 和宿主机 Nginx。相对部署目录 `DEPLOY_DATA_DIR=./services-data` 以工具安装目录为基准，与 `/workspace` 无关；不要在项目里尝试修改共享服务配置。
-
-`deploy/start/restart` 返回 `publicVerified:false`，不会隐式请求公网。执行：
+开发镜像提供 `/opt/devctl/skills/app-deployment/examples/python/`，含环境准备脚本、Python 服务、Supervisor 和 Nginx 示例。它演示虚拟环境及非 root 前台进程，不是语言限制。**先审查并按实际情况改应用名、固定 UID、端口和依赖**；示例使用 `demo`、UID/GID 20000、端口 20000，避免与已有应用冲突。Nginx `server_name` 使用明确的已配置域名（示例为 `app-demo.example.com`），需要联调别名时逐一添加，不使用匹配任意后缀的域名正则。
 
 ```bash
-appctl verify demo
+scp -r /opt/devctl/skills/app-deployment/examples/python app-services:upload
+ssh app-services 'sudo -n bash -s' <<'REMOTE'
+set -euo pipefail
+base=/srv/app-services
+stage=/home/deploy/upload
+install -o root -g root -m 0700 "$stage/setup.sh" "$base/setup.d/.demo.tmp"
+mv "$base/setup.d/.demo.tmp" "$base/setup.d/10-demo.sh"
+bash -eu "$base/setup.d/10-demo.sh"
+install -o root -g root -m 0644 "$stage/server.py" "$base/apps/demo/code/server.py"
+install -o root -g root -m 0600 "$stage/supervisor.conf" "$base/supervisor/demo.conf"
+supervisorctl reread
+supervisorctl update demo
+REMOTE
 ```
 
-该命令从当前开发容器发起请求，验证 TLS 并输出 HTTP 状态及内容类型；不会将结果写成永久“已验证”状态。网络受限、证书失败、无 URL 配置时明确报告失败，不能虚报公网通过。继续检查页面、JS/CSS、业务 API、WebSocket 或 SSE；HTTP 200 也可能是默认页、登录页或 Cloudflare 质询，3xx 仅说明重定向而非最终内容正确。
-
-应用使用域名根路径，不需要 context path。不要为了发布修改其他应用、共享网关或宿主机服务。
-
-## 删除、备份与安全
-
-`stop` 和 `delete` 不可混淆。永久删除必须获得用户明确授权，并显式使用 `--yes`；备份业务数据后再执行。删除包括运行定义、整个应用目录（所有产物、隐藏文件、`APP_DATA_DIR` 和日志），不保留历史或回收站，不删除安装控制账号与密钥。
+然后用 `ssh app-services 'curl --fail --max-time 5 http://127.0.0.1:20000/'` 检查应用（必要时有界重试，不能把进程存在当作健康）。成功后安装路由：
 
 ```bash
-# 在任意项目的开发容器中；无需先 stop
-appctl delete demo --yes
-appctl list
-# 或在宿主机任意目录中调用：
-# devctl apps delete demo --yes
-# devctl apps list
+ssh app-services 'sudo -n bash -s' <<'REMOTE'
+set -euo pipefail
+base=/srv/app-services
+install -o root -g root -m 0600 "/home/deploy/upload/nginx.conf" "$base/nginx/demo.conf"
+nginx -t -c /opt/app-services/nginx.conf
+nginx -s reload -c /opt/app-services/nginx.conf
+REMOTE
+curl --fail --max-time 5 -H 'Host: app-demo.example.com' http://app-services:8080/
 ```
 
-只有命令成功退出并返回 `state: "deleted"` 才能视为服务端清理完成。开发项目中的源码和本地 `dist/`、`.next/`、`deploy/` 等构建输出不属于服务端副本，应通过项目自己的清理流程删除。不要直接 `rm` 运行中的服务目录；外部数据库、备份、快照和 CDN 缓存需单独处理，文件删除不是安全擦除。
+生产变更应保留上一份配置和产物；验证失败恢复原配置再重载。以上是最小示例，不提供自动事务、数据库回滚或无停机保证。
 
-删除先确认路由撤下并持久记录 `deleting`，再停止和清理文件，最后删除登记并释放名称。中断时不会重启已部分删除的应用：重试 `delete` 或下次服务启动会完成清理。清理失败时保留 `deleting` 和名称占用，不能冒充删除成功。缺失的应用报错。
+## 日常管理
 
-服务账号只有受限 SSH 操作，无 Shell、SFTP、任意文件读取或端口转发。日志和业务数据可能含秘密，不原样公开。根目录应完整备份，保留数字 UID/GID、模式和 SSH 主机密钥；数据库需一致性备份。`./services-data` 已从 Git 和镜像构建排除，不作为开发工作区挂载。每应用 UID 不是恶意代码安全沙箱，不同信任边界应使用独立服务实例与数据目录。
+```bash
+ssh app-services 'sudo supervisorctl status'
+ssh app-services 'sudo supervisorctl restart demo'
+ssh app-services 'sudo tail -n 100 /srv/app-services/apps/demo/logs/stderr.log'
+```
+
+Supervisor 定义使用独立进程组、`stopasgroup=true`、`killasgroup=true`、有限停止时间和日志轮转。示例通过 `setpriv` 在执行应用前切换 UID/GID、清空组和能力并设置 no-new-privileges。应用保持前台，不能自行 daemonize、脱离进程组或依赖 SSH 会话。服务容器的停止宽限期为 30 秒，必须覆盖应用与核心服务的停止预算；需要更长时间的程序应由管理员调整容器配置并验证实际停机，不能把强制终止当作正常关闭。
+
+**`supervisorctl stop` 只影响当前 Supervisor 进程的运行状态。**需要重建后仍停止时，将该程序的持久配置改成 `autostart=false`，再执行 `supervisorctl reread` 和 `supervisorctl update <name>`。同时将其路由移出 `nginx/*.conf` 并校验重载，否则网关可能返回 502。重新启用时改回 `autostart=true`、更新监督器、确认内部健康后恢复路由。
+
+新版本可使用独立发布目录和新端口，健康后切换路由，再停止旧进程；也可在明确接受中断时停止后替换。程序状态、健康和业务正确性是三件事，不能混为一谈。单写数据库、迁移及任务消费的并发副作用由应用协调。
+
+## 网关、联调与公网
+
+HTTP 应用建议只监听服务容器回环地址，使用不冲突的内部端口，通过 Nginx `Host` 路由暴露。非 HTTP 后台任务无需路由；其他协议按实际需要配置内部监听或明确的宿主入口，不能宣称 HTTP 网关支持所有协议。
+
+开发容器联调示例：`curl -H 'Host: app-api.example.com' http://app-services:8080/`。新增 HTTP 应用只改服务容器内的路由文件，不逐项修改宿主 Nginx 或占用新宿主端口。共享路由模板支持 WebSocket 和 SSE，未知应用返回 404；删除或停用应用须撤下路由。
+
+由宿主管理员配置 DNS、TLS 及固定回环上游。宿主参考配置接受 `app-` 加最多 59 字符的小写字母、数字或中划线应用标识（首尾为字母或数字），构成不超过 63 字符的 DNS 标签；这只是该参考入口的命名约定，不是服务容器的应用管理协议。可选 `DEPLOY_PUBLIC_URL=https://app-{app}.example.com` 仅为地址模板，非自动公网验证。部署后用 curl 校验证书、HTTP 状态、页面、资源、API 和长连接。重定向、登录页或 Cloudflare 质询不算业务通过；不要为了测试而关闭 TLS 校验。外部请求转发头只有在宿主可信代理已清洗时才可用于业务信任判断。
+
+## 删除与备份
+
+SSH 管理权限允许直接修改和删除文件；skill 是操作指导，不是权限隔离。**永久删除必须先获得用户明确授权并备份**，授权与备份要求属于操作流程，不由 SSH 命令强制执行。
+
+先持久禁用应用、停止进程并撤下路由，确认无相关进程后，移除对应 Supervisor 配置并更新监督器。逐一核对应用代码/数据/日志路径、环境脚本、运行账号和组，再删除；不要使用模糊通配符、递归追随符号链接或清理共享运行时。中断后先检查实际状态再继续，不宣称具有自动事务恢复。保留安装 SSH 身份及其他应用。
+
+源码、本地构建输出、外部数据库、CDN、快照和备份不属于服务端副本；分别处理。卸载工具、删除容器和删除应用不是同一操作。备份整个持久目录，保留数字 UID/GID、权限和主机密钥；数据库必须一致性备份，备份应加密。

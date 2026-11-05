@@ -19,7 +19,7 @@ smoke_wait_service() {
             printf '服务容器在就绪前退出：%s（%s）\n' "$container" "$state" >&2
             return 1
         fi
-        if docker exec "$container" curl -fsS --max-time 2 http://127.0.0.1:9000/healthz >/dev/null 2>&1; then
+        if docker exec "$container" /opt/app-services/healthcheck.sh >/dev/null 2>&1; then
             return 0
         fi
         if (( attempt < attempts )); then sleep "$interval"; fi

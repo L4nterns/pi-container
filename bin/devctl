@@ -29,7 +29,14 @@ CORE=(docker compose --project-directory "$REPO" \
 CURRENT=("${CORE[@]}" --project-name "$PROJECT")
 
 usage() {
-    printf '%s\n' '用法：devctl [shell [Bash 参数...]|stop|down [--all]|ps|build [构建参数...]|rebuild [构建参数...]|recreate|apps {list|status|logs|start|restart|stop|delete|verify} [app] [--yes]|services {up|stop|down|ps|logs|build|recreate}]'
+    printf '%s\n' \
+        '用法：devctl [命令]' \
+        '  devctl                         当前项目运行 Pi（开发容器）' \
+        '  devctl shell [Bash 参数...]     进入开发容器 Shell' \
+        '  devctl server [Bash 参数...]    进入独立服务容器 Shell（SSH）' \
+        '  devctl stop | down [--all] | ps | recreate' \
+        '  devctl build | rebuild [构建参数...]' \
+        '  devctl services {up|stop|down|ps|logs|build|recreate}'
 }
 
 init_lifecycle() {
@@ -49,6 +56,13 @@ managed_projects() {
         printf '%s\n' "$name"
     done <<< "$ids"
 }
+
+# All state belongs to one non-root host identity, including service locks and
+# credentials. Do not create root-owned installation state via sudo devctl.
+if [[ "$UID_VALUE" == 0 && "${1:-}" != --help && "${1:-}" != -h ]]; then
+    printf '请使用非 root 宿主机用户运行 devctl，不要 sudo devctl。\n' >&2
+    exit 2
+fi
 
 case "${1:-}" in
     --help|-h)
@@ -113,8 +127,14 @@ case "${1:-}" in
     "")
         if (( $# )); then usage >&2; exit 2; fi
         ;;
-    shell) ;;
-    services|apps) ;;
+    shell|server) ;;
+    services)
+        if (( $# != 2 )); then usage >&2; exit 2; fi
+        case "$2" in
+            up|stop|down|ps|logs|build|recreate) ;;
+            *) usage >&2; exit 2 ;;
+        esac
+        ;;
     *)
         printf '未知命令：%s\n' "$1" >&2
         usage >&2
@@ -122,11 +142,7 @@ case "${1:-}" in
         ;;
 esac
 
-if [[ "$UID_VALUE" == 0 && "${1:-}" != services ]]; then
-    printf '请使用非 root 宿主机用户运行 devctl，不要 sudo devctl。\n' >&2
-    exit 2
-fi
-if [[ "$WORKDIR" == / && "${1:-}" != apps && "${1:-}" != services ]]; then
+if [[ "$WORKDIR" == / && "${1:-}" != services && "${1:-}" != server ]]; then
     printf '拒绝将宿主机根目录 / 挂载为工作区；请先进入具体项目目录\n' >&2
     exit 2
 fi
@@ -137,28 +153,19 @@ COMPOSE=(docker compose --project-directory "$REPO" --project-name "$PROJECT" \
     --file "$REPO/compose.yaml" --env-file "$ENV_FILE")
 
 deployment_config
-if [[ "${1:-}" == apps ]]; then
+if [[ "${1:-}" == server ]]; then
     shift
-    case "${1:-}" in
-        list) (( $# == 1 )) || { usage >&2; exit 2; } ;;
-        status|logs|start|restart|stop|verify) (( $# == 2 )) || { usage >&2; exit 2; } ;;
-        delete) (( $# == 3 )) && [[ "$3" == --yes ]] || { usage >&2; exit 2; } ;;
-        *) usage >&2; exit 2 ;;
-    esac
-    if (( $# > 1 )) && [[ ! "$2" =~ ^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$ ]]; then
-        printf '应用名不合法。\n' >&2; exit 2
-    fi
     provision_deployment
-    docker run --rm --security-opt no-new-privileges \
+    tty_flags=()
+    if [[ -t 0 && -t 1 ]]; then tty_flags=(-it); else tty_flags=(-i); fi
+    docker run --rm --init --pull never "${tty_flags[@]}" --security-opt no-new-privileges \
         --network "$DEPLOY_NETWORK" \
         --mount "type=bind,source=$DEPLOY_CREDENTIAL_DIR,target=/run/deploy-credentials,readonly" \
-        --env "DEPLOY_PUBLIC_URL=$DEPLOY_PUBLIC_URL" \
         --env "DEV_UID=$DEV_UID" --env "DEV_GID=$DEV_GID" --env "DEV_GROUPS=$DEV_GROUPS" \
-        --entrypoint /usr/local/bin/dev-entrypoint "$DEV_IMAGE" --appctl "$@"
+        --entrypoint /usr/local/bin/dev-entrypoint "$DEV_IMAGE" --service-shell "$@"
     exit $?
 fi
 if [[ "${1:-}" == services ]]; then
-    if (( $# != 2 )); then usage >&2; exit 2; fi
     deployment_require_config
     exec {services_fd}>>"$REPO/.services.lock"
     flock -x "$services_fd"

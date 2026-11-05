@@ -16,10 +16,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
-      - name: Install ShellCheck, Nginx and OpenSSH for real-tool regressions
+      - name: Install ShellCheck, Python and OpenSSH for real-tool regressions
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck nginx openssh-client
+          sudo apt-get install -y shellcheck python3 openssh-client
+      - name: Install pinned test dependencies
+        run: npm ci --ignore-scripts
       - name: Check scripts and run isolated tests
         run: bash scripts/check.sh
       - name: Test entrypoint identity in a disposable root filesystem
@@ -30,5 +32,5 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Build images and test SSH deployment, gateway and durable recovery
+      - name: Build images and test normal SSH/SFTP, sudo, non-Node apps and durable recovery
         run: bash tests/docker-smoke.sh

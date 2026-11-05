@@ -60,7 +60,7 @@ deployment_require_config() {
 }
 
 provision_deployment() {
-    local credentials admin service_user host_key
+    local credentials host_key
     deployment_require_config || return
     umask 077
     credentials="$REPO/.deploy-keys/installation"
@@ -75,21 +75,21 @@ provision_deployment() {
     exec {service_fd}>>"$REPO/.services.lock"
     flock -x "$service_fd"
     "${SERVICE_COMPOSE[@]}" up -d --wait --no-recreate services >&2
-    admin=$("${SERVICE_COMPOSE[@]}" exec -T services /usr/local/bin/deploy-admin register \
+    host_key=$("${SERVICE_COMPOSE[@]}" exec -T services /usr/local/bin/deploy-register \
         "$(<"$credentials/id_ed25519.pub")")
-    # Parse inside the container: the host does not need a Node installation.
-    printf '%s' "$admin" | "${SERVICE_COMPOSE[@]}" exec -T services node -e '
-let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{
-  const v=JSON.parse(s);if(v.user!=="deploy"||!/^ssh-ed25519 [A-Za-z0-9+/=]+$/.test(v.hostKey))process.exit(1);
-  console.log(v.user);console.log(v.hostKey);
-});' > "$credentials/registration.tmp"
-    {
-        IFS= read -r service_user
-        IFS= read -r host_key
-    } < "$credentials/registration.tmp"
-    printf '%s\n' "$service_user" > "$credentials/user"
-    printf '[app-services]:2222 %s\n' "$host_key" > "$credentials/known_hosts"
-    rm -- "$credentials/registration.tmp"
+    if [[ ! "$host_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}$ ]]; then
+        printf '服务 SSH 主机密钥不合法，未更新信任记录。\n' >&2
+        return 1
+    fi
+    # Atomic replacement prevents concurrent SSH clients reading a partial key.
+    # Base64-shaped text is not necessarily a valid SSH public-key structure.
+    printf '[app-services]:2222 %s\n' "$host_key" > "$credentials/known_hosts.tmp"
+    if ! ssh-keygen -l -f "$credentials/known_hosts.tmp" >/dev/null 2>&1; then
+        rm -f -- "$credentials/known_hosts.tmp"
+        printf '服务 SSH 主机密钥不合法，未更新信任记录。\n' >&2
+        return 1
+    fi
+    mv -- "$credentials/known_hosts.tmp" "$credentials/known_hosts"
     flock -u "$service_fd"
     exec {service_fd}>&-
     flock -u "$deploy_fd"

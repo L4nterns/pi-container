@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local daemon only; all bind mounts, keys and service state are temporary.
+# Local Docker only. No real .env, service data, published ports or public ingress.
 set -euo pipefail
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=tests/helpers/docker-smoke.sh
@@ -19,9 +19,9 @@ cleanup() {
         smoke_container_diagnostics "$SERVICE"
         smoke_container_diagnostics "$DEV"
     fi
-    # Never restart failed workloads for cleanup: preserve their exit evidence
-    # and use a separate one-shot helper to restore temporary bind permissions.
     docker rm -f "$DEV" "$SERVICE" >/dev/null 2>&1 || true
+    # Restore temporary bind permissions in a separate helper; never restart a
+    # failed workload and destroy its exit evidence merely to clean files.
     docker run --rm --pull never --network none --user 0 --entrypoint /bin/sh \
         --mount "type=bind,source=$TMP,target=/cleanup" "$IMAGE" -ec \
         'chown -Rh "$1:$2" /cleanup; chmod -R u+rwX /cleanup' \
@@ -35,8 +35,11 @@ cleanup() {
     exit "$status"
 }
 trap cleanup EXIT
-mkdir -p "$TMP/agent" "$TMP/workspace/bundle" "$TMP/keys" "$TMP/services"
-chmod 755 "$TMP" "$TMP/workspace" "$TMP/workspace/bundle"
+mkdir -p "$TMP/agent" "$TMP/workspace" "$TMP/keys" "$TMP/services"
+cp -R "$REPO/skills/app-deployment/examples/python" "$TMP/workspace/reviewed"
+cp "$REPO/tests/fixtures/http-protocols.py" "$TMP/workspace/reviewed/server.py"
+chmod 755 "$TMP" "$TMP/workspace" "$TMP/workspace/reviewed"
+chmod 644 "$TMP/workspace/reviewed/"*
 export DEV_UID=12345 DEV_GID=12345 DEV_GROUPS=12345 DEV_WORKSPACE="$TMP/workspace"
 export DEV_SESSION_DIR=/home/node/.pi/agent/project-sessions/smoke
 export DEV_IMAGE="$IMAGE" DEPLOY_IMAGE="$SERVICE_IMAGE" DEPLOY_NETWORK="$NETWORK"
@@ -48,86 +51,180 @@ docker compose -f compose.yaml -f compose.deploy.yaml --env-file .env.example co
 docker compose -f compose.services.yaml --env-file .env.example config --quiet
 docker build --tag "$IMAGE" .
 docker build --file services/Dockerfile --tag "$SERVICE_IMAGE" .
+if rejected=$(docker run --rm --security-opt no-new-privileges:true --network none "$SERVICE_IMAGE" 2>&1); then
+    printf 'Misconfigured service unexpectedly allowed no-new-privileges\n' >&2; exit 1
+fi
+[[ "$rejected" == *'do not set no-new-privileges'* ]] || { printf '%s\n' "$rejected" >&2; exit 1; }
 docker network create "$NETWORK" >/dev/null
-docker run -d --name "$SERVICE" --init --security-opt no-new-privileges:true \
-    --network "$NETWORK" --network-alias app-services \
-    --mount "type=bind,source=$TMP/services,target=/srv/app-services" \
-    --env "DEPLOY_PUBLIC_URL=$DEPLOY_PUBLIC_URL" "$SERVICE_IMAGE"
-smoke_wait_service "$SERVICE"
-# Keys never enter the shared Pi agent directory.
+start_service() {
+    docker run -d --name "$SERVICE" --init \
+        --network "$NETWORK" --network-alias app-services \
+        --mount "type=bind,source=$TMP/services,target=/srv/app-services" "$SERVICE_IMAGE"
+    smoke_wait_service "$SERVICE" 180
+}
+start_service
+docker cp "$REPO/config/nginx-apps.conf" "$SERVICE:/run/host-nginx-template.conf"
+docker exec -i "$SERVICE" sh -s -- /run/host-nginx-template.conf < "$REPO/tests/fixtures/check-host-nginx.sh"
+# The image provides management tools, not a preselected application runtime.
+docker exec "$SERVICE" sh -ec 'if command -v node; then exit 1; fi; if python3 -m ensurepip --version >/dev/null 2>&1; then exit 1; fi'
 docker run --rm --entrypoint ssh-keygen --mount "type=bind,source=$TMP/keys,target=/keys" "$IMAGE" -q -t ed25519 -N '' -f /keys/id_ed25519
-ADMIN=$(docker exec "$SERVICE" deploy-admin register "$(<"$TMP/keys/id_ed25519.pub")")
-# Parse inside the built image; the Docker host does not need Node or jq.
-printf '%s' "$ADMIN" | docker run --rm -i --pull never --network none --user 0 \
-    --entrypoint node --mount "type=bind,source=$TMP/keys,target=/keys" "$IMAGE" -e '
-let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{
-  const v=JSON.parse(s),fs=require("node:fs"),d=process.argv[1];
-  if(v.user!=="deploy"||!/^ssh-ed25519 [A-Za-z0-9+/=]+$/.test(v.hostKey))throw new Error("Invalid service registration");
-  fs.writeFileSync(d+"/user",v.user+"\n",{mode:0o600});
-  fs.writeFileSync(d+"/known_hosts","[app-services]:2222 "+v.hostKey+"\n",{mode:0o600});
-});' /keys
+HOST_KEY=$(docker exec "$SERVICE" deploy-register "$(<"$TMP/keys/id_ed25519.pub")")
+[[ "$HOST_KEY" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}$ ]] || { printf 'Invalid SSH host key\n' >&2; exit 1; }
+printf '[app-services]:2222 %s\n' "$HOST_KEY" > "$TMP/keys/known_hosts"
 docker run --rm --entrypoint chown --mount "type=bind,source=$TMP/keys,target=/keys" "$IMAGE" -Rh 12345:12345 /keys
-manifest='{"command":["node","server.mjs"],"healthPath":"/health","readyTimeout":10,"env":{"NODE_OPTIONS":"--import ./preflight.mjs"}}'
-printf '%s\n' "if(process.getuid()===0||process.getgroups().includes(0))throw new Error('app env loaded before privilege drop');" > "$TMP/workspace/bundle/preflight.mjs"
-printf '%s\n' "$manifest" > "$TMP/workspace/bundle/app-deploy.json"
-printf '%s\n' "import fs from 'node:fs'; import http from 'node:http'; fs.writeFileSync(process.env.APP_DATA_DIR+'/proof', 'durable'); http.createServer((q,s)=>s.end('persistent service')).listen(Number(process.env.PORT),process.env.HOST);" > "$TMP/workspace/bundle/server.mjs"
-chmod 644 "$TMP/workspace/bundle/"*
 docker run -d --name "$DEV" --init --security-opt no-new-privileges:true --network "$NETWORK" \
     --mount "type=bind,source=$TMP/agent,target=/home/node/.pi/agent" \
     --mount "type=bind,source=$TMP/workspace,target=/workspace" \
     --mount "type=bind,source=$TMP/keys,target=/run/deploy-credentials,readonly" \
     --env DEV_UID=12345 --env DEV_GID=12345 --env DEV_GROUPS=12345 \
     --entrypoint sleep "$IMAGE" infinity
-docker exec "$DEV" dev-entrypoint --dev-shell -ec '
-    test "$(id -u)" = 12345
-    test "$(id -g)" = 12345
-    test "$(id -un)" = node
+client() { docker exec -i "$DEV" dev-entrypoint --dev-shell -ec "$1"; }
+# Variables expand in the remote shell, not the host.
+# shellcheck disable=SC2016
+client '
+    test "$(id -u):$(id -g):$(id -un)" = 12345:12345:node
     test "$USER:$LOGNAME:$HOME" = node:node:/home/node
-    getent passwd 12345 | grep -Eq "^node:[^:]*:12345:12345:"
-    ssh -F /dev/null -T -G app-services >/dev/null
     grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/self/status
     grep -Eq "^CapBnd:[[:space:]]+0+$" /proc/self/status
-    touch /home/node/.pi/agent/check
+    test "$(ssh app-services id -u)" = 19000
+    test "$(ssh app-services sudo -n id -u)" = 0
+    ssh -tt app-services test -t 0
+    ssh app-services "printf disposable > ~/staging-proof"
 '
-docker exec "$DEV" dev-entrypoint --version
-docker exec "$DEV" dev-entrypoint --version
-docker exec "$DEV" dev-entrypoint --dev-shell -ec 'appctl deploy smoke /workspace/bundle; appctl list; appctl status smoke; appctl logs smoke'
-if docker exec "$DEV" dev-entrypoint --dev-shell -c 'ssh -F /dev/null -p 2222 -i /run/deploy-credentials/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/run/deploy-credentials/known_hosts "$(tr -d "\n" < /run/deploy-credentials/user)@app-services" id'; then
-    printf 'SSH 不应允许任意命令\n' >&2; exit 1
-fi
-docker stop "$DEV" >/dev/null
-# Manage persisted applications with no development container or source mount.
-docker run --rm --security-opt no-new-privileges:true \
-    --network "$NETWORK" --env DEV_UID=12345 --env DEV_GID=12345 --env DEV_GROUPS=12345 \
-    --mount "type=bind,source=$TMP/keys,target=/run/deploy-credentials,readonly" \
-    --entrypoint /usr/local/bin/dev-entrypoint "$IMAGE" --appctl restart smoke
-docker exec "$SERVICE" node -e '
-const fs=require("node:fs");const apps=JSON.parse(fs.readFileSync("/srv/app-services/apps.json"));
-const uid=apps.smoke.uid;
-if(!Number.isInteger(uid)||uid<20000)throw new Error("Invalid app UID");
-if(fs.statSync("/srv/app-services/apps/smoke/data/proof").uid!==uid)throw new Error("App ran with wrong identity");
-if(fs.readFileSync("/etc/passwd","utf8").split("\n").find(l=>l.startsWith("app"+uid+":"))?.split(":")[6]!=="/usr/sbin/nologin")throw new Error("App account must not have a shell");
-'
-docker exec "$SERVICE" curl -fsS -H 'Host: app-smoke.example.com' http://127.0.0.1:8080/ | grep -q 'persistent service'
-# Recreate the service container from only its host-mounted state.
-docker rm -f "$SERVICE" >/dev/null
-docker run -d --name "$SERVICE" --init --security-opt no-new-privileges:true \
-    --network "$NETWORK" --network-alias app-services \
-    --mount "type=bind,source=$TMP/services,target=/srv/app-services" \
-    --env "DEPLOY_PUBLIC_URL=$DEPLOY_PUBLIC_URL" "$SERVICE_IMAGE"
-smoke_wait_service "$SERVICE"
-docker exec "$SERVICE" curl -fsS -H 'Host: app-smoke.example.com' http://127.0.0.1:8080/ | grep -q 'persistent service'
-docker start "$DEV" >/dev/null
-docker exec "$DEV" dev-entrypoint --dev-shell -ec 'appctl restart smoke; appctl stop smoke; appctl start smoke'
-docker exec "$SERVICE" curl -fsS -H 'Host: app-smoke.example.com' http://127.0.0.1:8080/ | grep -q 'persistent service'
-if docker exec "$DEV" dev-entrypoint --dev-shell -ec 'appctl delete smoke'; then
-    printf '删除必须显式确认 --yes\n' >&2; exit 1
-fi
-docker exec "$DEV" dev-entrypoint --dev-shell -ec 'appctl delete smoke --yes; appctl list'
-docker exec "$SERVICE" test ! -e /srv/app-services/apps/smoke
-for host in app-smoke.example.com app-missing.example.com; do
-    if docker exec "$SERVICE" curl -fsS -H "Host: $host" http://127.0.0.1:8080/; then
-        printf '已删除或未知应用不应被代理\n' >&2; exit 1
-    fi
+status=0
+client 'ssh app-services "exit 37"' || status=$?
+[[ "$status" == 37 ]] || { printf 'SSH command exit status was not preserved\n' >&2; exit 1; }
+# Identical Bash argument/stdin/exit semantics, over exec and over real SSH.
+for mode in --dev-shell --service-shell; do
+    docker exec -t "$DEV" dev-entrypoint "$mode" -c 'test -t 0 && test -t 1'
+    # shellcheck disable=SC2016
+    docker exec -i "$DEV" dev-entrypoint "$mode" -lc \
+        'test "$#" = 3 && test "$1" = "two words" && test -z "$2" && test "$3" = '\''$HOME;*'\'' && ! test -t 0' \
+        bash 'two words' '' '$HOME;*'
+    status=0
+    docker exec -i "$DEV" dev-entrypoint "$mode" -s -- 'stdin argument' <<'BASH' || status=$?
+[[ "$1" == 'stdin argument' ]] || exit 91
+exit 37
+BASH
+    [[ "$status" == 37 ]] || { printf 'Bash stdin/exit contract failed: %s\n' "$mode" >&2; exit 1; }
 done
-printf 'Docker smoke checks passed. Isolated integration only; .env and public ingress were not used.\n'
+# Assert actual skill discovery and on-demand instructions without model/API calls.
+docker exec "$DEV" dev-entrypoint --version
+docker exec "$DEV" dev-entrypoint --version
+client 'node --input-type=module -e '\''
+import {loadSkills,formatSkillsForPrompt} from "/opt/devctl/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
+const result=loadSkills({cwd:"/workspace",agentDir:"/tmp/skill-check-empty",skillPaths:["/opt/devctl/skills/app-deployment"]});
+const skill=result.skills.find(s=>s.name==="app-deployment");
+if(!skill||result.diagnostics.some(d=>d.type==="warning"))throw new Error("Skill discovery failed");
+const prompt=formatSkillsForPrompt([skill]);
+if(!prompt.includes("app-deployment")||prompt.includes("Stopping preserves"))throw new Error("Instructions must load on demand");
+'\'''
+client 'scp -r /workspace/reviewed app-services:upload; printf "get upload/server.py /tmp/downloaded-server.py\n" | sftp -b - app-services; cmp /workspace/reviewed/server.py /tmp/downloaded-server.py'
+# Exercise SSH dependency installation and persistent startup preparation with a
+# Python virtual environment. Nothing executes an application as root.
+client "ssh app-services 'sudo -n bash -s'" <<'REMOTE'
+set -euo pipefail
+umask 077
+base=/srv/app-services
+stage=/home/deploy/upload
+install -o root -g root -m 0700 "$stage/setup.sh" "$base/setup.d/10-demo.sh"
+bash -eu "$base/setup.d/10-demo.sh"
+install -o root -g root -m 0644 "$stage/server.py" "$base/apps/demo/code/server.py"
+install -o root -g root -m 0600 "$stage/supervisor.conf" "$base/supervisor/demo.conf"
+printf 'printf restored > /etc/environment-proof\n' > "$base/setup.d/20-proof.sh"
+chmod 700 "$base/setup.d/20-proof.sh"
+bash "$base/setup.d/20-proof.sh"
+supervisorctl reread
+supervisorctl update demo
+REMOTE
+client "ssh app-services 'sudo -n bash -s'" <<'REMOTE'
+set -euo pipefail
+for i in {1..50}; do
+    if curl -fsS --max-time 1 http://127.0.0.1:20000/; then break; fi
+    sleep .2
+done
+curl -fsS --max-time 1 http://127.0.0.1:20000/
+base=/srv/app-services
+install -o root -g root -m 0600 "/home/deploy/upload/nginx.conf" "$base/nginx/demo.conf"
+nginx -t -c /opt/app-services/nginx.conf
+nginx -s reload -c /opt/app-services/nginx.conf
+pid=$(supervisorctl pid demo)
+grep -Eq '^Uid:[[:space:]]+20000[[:space:]]+20000' "/proc/$pid/status"
+grep -Eq '^NoNewPrivs:[[:space:]]+1$' "/proc/$pid/status"
+grep -Eq '^CapBnd:[[:space:]]+0+$' "/proc/$pid/status"
+test "$(stat -c %u "$base/apps/demo/data/starts")" = 20000
+if sudo -u app-demo sudo -n id -u; then echo 'App account must not gain root' >&2; exit 1; fi
+REMOTE
+wait_app() {
+    local attempt
+    for (( attempt=0; attempt<60; attempt++ )); do
+        if docker exec "$SERVICE" curl -fsS --max-time 1 -H 'Host: app-demo.example.com' http://127.0.0.1:8080/ 2>/dev/null | grep -q 'Hello from Python'; then return 0; fi
+        sleep .2
+    done
+    printf 'Application gateway did not become healthy\n' >&2; return 1
+}
+wait_app
+docker exec -i "$SERVICE" python3 < "$REPO/tests/fixtures/check-protocols.py"
+client "ssh app-services 'sudo kill -KILL \$(sudo supervisorctl pid demo)'"
+# Confirm a new process has actually served a request, not just a PID change.
+client "ssh app-services 'sudo -n bash -s'" <<'REMOTE'
+set -euo pipefail
+for i in {1..50}; do
+    if [[ $(cat /srv/app-services/apps/demo/data/starts) -ge 2 ]]; then exit 0; fi
+    sleep .2
+done
+exit 1
+REMOTE
+wait_app
+docker stop "$DEV" >/dev/null
+rm -rf -- "$TMP/workspace/reviewed"
+# Same path as devctl server: no source/Pi bind mount, numeric NSS initialization.
+standalone() {
+    docker run --rm --init --pull never -i --security-opt no-new-privileges:true --network "$NETWORK" \
+        --env DEV_UID=12345 --env DEV_GID=12345 --env DEV_GROUPS=12345 \
+        --mount "type=bind,source=$TMP/keys,target=/run/deploy-credentials,readonly" \
+        --entrypoint /usr/local/bin/dev-entrypoint "$IMAGE" --service-shell "$@"
+}
+standalone -c 'sudo supervisorctl restart demo'
+wait_app
+# Fresh image filesystem: installed packages and account records must be restored.
+docker rm -f "$SERVICE" >/dev/null
+start_service
+wait_app
+standalone -s < "$REPO/tests/fixtures/check-service-recovery.sh"
+[[ "$(docker exec "$SERVICE" cat /srv/app-services/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f1-2)" == "$HOST_KEY" ]]
+standalone -c 'sudo -n bash -s' <<'DISABLE'
+set -euo pipefail
+sed -i 's/^autostart=true/autostart=false/' /srv/app-services/supervisor/demo.conf
+supervisorctl reread
+supervisorctl update demo
+mv /srv/app-services/nginx/demo.conf /srv/app-services/nginx/demo.disabled
+nginx -t -c /opt/app-services/nginx.conf
+nginx -s reload -c /opt/app-services/nginx.conf
+DISABLE
+docker rm -f "$SERVICE" >/dev/null
+start_service
+standalone -c 'sudo -n bash -s' <<'STOPPED'
+set -euo pipefail
+status=$(supervisorctl status demo) || test "$?" = 3
+[[ "$status" == *STOPPED* ]]
+STOPPED
+for host in app-demo.example.com app-missing.example.com; do
+    code=$(docker exec "$SERVICE" curl -sS --max-time 2 -o /dev/null -w '%{http_code}' -H "Host: $host" http://127.0.0.1:8080/)
+    [[ "$code" == 404 ]] || { printf 'Expected 404, got %s\n' "$code" >&2; exit 1; }
+done
+# Explicit test authorization: delete only this isolated fixture application.
+standalone -c 'sudo -n bash -s' <<'REMOTE'
+set -euo pipefail
+rm /srv/app-services/supervisor/demo.conf
+supervisorctl reread
+supervisorctl update
+rm /srv/app-services/nginx/demo.disabled /srv/app-services/setup.d/10-demo.sh
+rm -rf /srv/app-services/apps/demo
+userdel app-demo
+if getent group app-demo >/dev/null; then groupdel app-demo; fi
+test ! -e /srv/app-services/apps/demo
+test -s /srv/app-services/control/authorized_keys
+test -d /home/deploy
+REMOTE
+printf 'Docker smoke checks passed. Isolated SSH/SFTP, sudo, Python, recovery and deletion; public ingress was not used.\n'

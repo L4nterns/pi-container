@@ -22,12 +22,11 @@ RUN set -eu; \
 ENV HOME=/home/node
 
 COPY dev-entrypoint.sh /usr/local/bin/dev-entrypoint
-COPY bin/appctl.mjs /opt/devctl/bin/appctl.mjs
-COPY services/protocol.mjs /opt/devctl/services/protocol.mjs
-COPY DEPLOYMENT.md deployment-prompt.md /opt/devctl/
+COPY config/ssh-app-services.conf /etc/ssh/ssh_config.d/50-app-services.conf
+COPY DEPLOYMENT.md /opt/devctl/
+COPY skills/app-deployment/ /opt/devctl/skills/app-deployment/
 RUN set -eu; \
-    chmod 0755 /usr/local/bin/dev-entrypoint /opt/devctl/bin/appctl.mjs; \
-    ln -s /opt/devctl/bin/appctl.mjs /usr/local/bin/appctl; \
+    chmod 0755 /usr/local/bin/dev-entrypoint; \
     printf '%s\n' 'set completion-ignore-case on' >> /etc/inputrc; \
     printf '%s\n' \
       "PS1='\\[\\e[2;90m\\]────────────────────────────────\\[\\e[0m\\]\\n\\[\\e[1;36m\\]\\u@\\h:\\w\\$ \\[\\e[0m\\]'" \

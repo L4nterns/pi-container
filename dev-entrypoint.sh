@@ -35,7 +35,7 @@ find "$AGENT_DIR" -xdev \( ! -uid "$DEV_UID" -o ! -gid "$DEV_GID" \) \
     -exec chown -h "$DEV_UID:$DEV_GID" {} +
 chmod 700 "$AGENT_DIR"
 
-if [ "${1:-}" != '--dev-shell' ] && [ "${1:-}" != '--appctl' ]; then
+if [ "${1:-}" != '--dev-shell' ] && [ "${1:-}" != '--service-shell' ]; then
     installed=''
     # The installation marker records the exact source.
     if [ -f "$MARKER" ]; then installed=$(head -n 1 "$MARKER"); fi
@@ -50,16 +50,29 @@ fi
 flock -u 9
 exec 9>&-
 
-if [ "${1:-}" = '--appctl' ]; then
+if [ "${1:-}" = '--service-shell' ]; then
     shift
-    exec setpriv --reuid "$DEV_UID" --regid "$DEV_GID" --groups "$DEV_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all node /opt/devctl/bin/appctl.mjs "$@"
+    # OpenSSH joins command arguments into shell text. Quote each Bash argument
+    # explicitly so spaces, empty strings and metacharacters survive that hop.
+    # Variables below expand in the unprivileged Bash, not this initializer.
+    # shellcheck disable=SC2016
+    exec setpriv --reuid "$DEV_UID" --regid "$DEV_GID" --groups "$DEV_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all bash -c '
+        command="exec bash"
+        if (( $# )); then
+            printf -v arguments " %q" "$@"
+            command+=$arguments
+        fi
+        tty=-T
+        if [[ -t 0 && -t 1 ]]; then tty=-t; fi
+        exec ssh "$tty" app-services "$command"
+    ' bash "$@"
 fi
 # A shell initializes identity/ownership but never installs packages.
 if [ "${1:-}" = '--dev-shell' ]; then
     shift
     exec setpriv --reuid "$DEV_UID" --regid "$DEV_GID" --groups "$DEV_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all bash "$@"
 fi
-if [ -r /run/deploy-credentials/user ]; then
-    set -- --append-system-prompt /opt/devctl/deployment-prompt.md "$@"
+if [ -r /run/deploy-credentials/known_hosts ]; then
+    set -- --skill /opt/devctl/skills/app-deployment "$@"
 fi
 exec setpriv --reuid "$DEV_UID" --regid "$DEV_GID" --groups "$DEV_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all pi "$@"

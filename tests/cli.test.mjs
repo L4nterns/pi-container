@@ -7,6 +7,12 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
+// Public test identity only; no corresponding private key is stored.
+const hostKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZbxB6rD5TGtb2T/JKn4uf6eoWr5j2WT6eOo+CFc4JI';
+const keygen = process.env.TEST_SSH_KEYGEN_BINARY || (process.env.TEST_SSH_BINARY ? path.join(path.dirname(process.env.TEST_SSH_BINARY), 'ssh-keygen') : '/usr/bin/ssh-keygen');
+// CLI tests stub key creation. Where OpenSSH is available, trust validation uses
+// the real parser; otherwise only the command-boundary double is exercised.
+const hasKeygen = await fs.access(keygen).then(() => true, () => false);
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-cli-test-'));
@@ -22,9 +28,13 @@ async function fixture(t) {
     await fs.copyFile(path.join(repo, file), path.join(tool, file));
   }
   await fs.writeFile(path.join(fakeBin, 'ssh-keygen'), `#!/bin/sh
+if [ "$1" = '-l' ]; then
+    ${hasKeygen ? `exec '${keygen}' "$@"` : `grep -Fq '${hostKey}' "$3"`}
+    exit $?
+fi
 while [ "$1" != '-f' ]; do shift; done
 printf 'test-only-not-a-key' > "$2"
-printf 'ssh-ed25519 %s\\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' > "$2.pub"
+printf '%s\\n' '${hostKey}' > "$2.pub"
 `, { mode: 0o755 });
   await fs.writeFile(path.join(fakeBin, 'id'), `#!/bin/sh
 case "$1" in -u|-g) printf '%s\\n' "\${FAKE_UID:-1000}" ;; -G) printf '1000\\n' ;; esac
@@ -36,14 +46,14 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ args, workspace: process.env.DEV_WORKSPACE, image: process.env.DEV_IMAGE, deployData: process.env.DEPLOY_DATA_DIR }) + '\\n');
 if (args.includes('config') && args.includes('--environment')) {
   for (const key of ['DEPLOY_DATA_DIR', 'DEPLOY_PUBLIC_URL', 'DEPLOY_PORT']) console.log(key + '=' + (process.env[key] || ''));
-} else if (args.includes('register')) {
-  console.log(JSON.stringify({ user: 'deploy', hostKey: 'ssh-ed25519 ' + 'A'.repeat(68) }));
-} else if (args.includes('node') && args.includes('-e')) {
-  console.log('deploy\\nssh-ed25519 ' + 'A'.repeat(68));
+} else if (args.includes('/usr/local/bin/deploy-register')) {
+  console.log(process.env.FAKE_HOST_KEY || ${JSON.stringify(hostKey)});
 } else if (args.includes('ps') && args.includes('-q')) {
   console.log('fake-container');
 } else if (args[0] === 'inspect') {
   console.log(process.env.FAKE_EXECS || '0');
+} else if (args[0] === 'run') {
+  process.exitCode = Number(process.env.FAKE_RUN_EXIT || 0);
 } else if (args.includes('exec')) {
   process.exitCode = Number(process.env.FAKE_EXIT || 0);
 }
@@ -65,13 +75,24 @@ if (args.includes('config') && args.includes('--environment')) {
 test('help/unknown commands do not invoke Docker or create runtime data', async t => {
   const { tool, run } = await fixture(t);
   assert.equal((await run(['--help'])).status, 0);
-  for (const command of ['unknown', 'root-shell']) {
+  for (const command of ['unknown', 'root-shell', 'ssh', 'apps']) {
     const bad = await run([command]);
     assert.equal(bad.status, 2);
     assert.deepEqual(bad.calls, []);
   }
   await assert.rejects(fs.access(path.join(tool, '.runtime')));
   await assert.rejects(fs.access(path.join(tool, 'data')));
+});
+
+test('command discovery explicitly distinguishes development shell from service SSH', async t => {
+  const { run } = await fixture(t);
+  const help = await run(['--help']);
+  assert.match(help.stdout, /devctl shell.*开发容器/);
+  assert.match(help.stdout, /devctl server \[Bash 参数\.\.\.\].*独立服务容器/);
+  for (const args of [['services'], ['services', 'ssh'], ['services', 'unknown'], ['services', 'up', 'extra']]) {
+    const invalid = await run(args);
+    assert.equal(invalid.status, 2); assert.deepEqual(invalid.calls, []);
+  }
 });
 
 test('forwards Bash args as separate arguments, uses non-TTY exec and stops after exit', async t => {
@@ -177,12 +198,12 @@ test('deployment provisions an installation key and shared control account witho
   const result = await run(['shell', '-c', 'true'], { DEPLOY_DATA_DIR: services });
   assert.equal(result.status, 0, result.stderr);
   assert.ok(result.calls.some(x => x.args.includes('--no-recreate') && x.args.includes('services')));
-  assert.ok(result.calls.some(x => x.args.includes('register')));
+  assert.ok(result.calls.some(x => x.args.includes('/usr/local/bin/deploy-register')));
   const up = result.calls.find(x => x.args.includes('up') && x.args.includes('pi'));
   assert.ok(up.args.some(x => x.endsWith('compose.deploy.yaml')));
   const dirs = await fs.readdir(path.join(tool, '.deploy-keys'));
   assert.equal(dirs.length, 1);
-  assert.equal(await fs.readFile(path.join(tool, '.deploy-keys', dirs[0], 'user'), 'utf8'), 'deploy\n');
+  assert.match(await fs.readFile(path.join(tool, '.deploy-keys', dirs[0], 'known_hosts'), 'utf8'), /^\[app-services\]:2222 ssh-ed25519 /);
   await assert.rejects(fs.access(path.join(tool, 'data', 'id_ed25519')));
 });
 
@@ -207,29 +228,73 @@ test('build, start and recreate share a checkout-specific image, not another che
   assert.notEqual(other.calls[0].image, images[0]);
 });
 
-test('host apps uses installation credentials without a source mount or project container', async t => {
+test('host SSH uses shared credentials without a source mount or project container and preserves command status', async t => {
   const { tool, root, project, run } = await fixture(t);
   const env = { DEPLOY_DATA_DIR: './services-data' };
-  assert.equal((await run(['apps', 'list'], env, tool)).status, 0);
+  assert.equal((await run(['server', '-c', 'id'], env, tool)).status, 0);
   const first = await fs.readFile(path.join(tool, '.deploy-keys', 'installation', 'id_ed25519'), 'utf8');
   await fs.rm(project, { recursive: true });
-  const result = await run(['apps', 'restart', 'demo'], env, root);
+  const command = 'sudo supervisorctl status; printf "%s" "hello world"';
+  const result = await run(['server', '-c', command], env, '/');
   assert.equal(result.status, 0, result.stderr);
   const client = result.calls.find(c => c.args[0] === 'run');
-  assert.ok(client); assert.ok(client.args.includes('--appctl'));
+  assert.ok(client);
+  assert.deepEqual(client.args.slice(-3), ['--service-shell', '-c', command]);
+  assert.ok(client.args.includes('-i')); assert.ok(!client.args.includes('-it'));
+  assert.equal(client.args[client.args.indexOf('--pull') + 1], 'never');
   assert.ok(!client.args.some(a => a.includes('target=/workspace')));
   assert.ok(!result.calls.some(c => c.args.includes('exec') && c.args.includes('pi')));
   assert.equal(await fs.readFile(path.join(tool, '.deploy-keys', 'installation', 'id_ed25519'), 'utf8'), first);
   assert.deepEqual(await fs.readdir(path.join(tool, '.deploy-keys')), ['installation']);
-  const bad = await run(['apps', 'delete', 'demo'], env, root);
-  assert.equal(bad.status, 2); assert.ok(!bad.calls.some(c => c.args.includes('register')));
+  const failed = await run(['server', '-c', 'exit 23'], { ...env, FAKE_RUN_EXIT: '23' }, root);
+  assert.equal(failed.status, 23);
+  const terminal = await run(['server'], env, '/');
+  assert.equal(terminal.status, 0, terminal.stderr);
+  assert.equal(terminal.calls.find(c => c.args[0] === 'run').args.at(-1), '--service-shell');
+  const absent = await run(['server'], {}, root);
+  assert.equal(absent.status, 1);
+  assert.ok(!absent.calls.some(c => c.args[0] === 'run'));
+});
+
+test('development and service shells forward the same Bash argument vectors', async t => {
+  const { run } = await fixture(t);
+  for (const [command, mode] of [['shell', '--dev-shell'], ['server', '--service-shell']]) {
+    for (const args of [[], ['-lc', 'printf "%s\\n" "$1"', 'label', 'a b'], ['-s', '--', '', "single'quote", '$literal;*', 'line\nbreak']]) {
+      const result = await run([command, ...args], { DEPLOY_DATA_DIR: './services-data' });
+      assert.equal(result.status, 0, result.stderr);
+      const client = result.calls.find(c => c.args.includes(mode));
+      assert.ok(client, `${command}: ${JSON.stringify(args)}`);
+      assert.deepEqual(client.args.slice(client.args.indexOf(mode)), [mode, ...args]);
+    }
+  }
+});
+
+test('real OpenSSH rejects malformed enrollment without replacing the trusted host key', {
+  skip: !hasKeygen && 'OpenSSH key parser is required for this regression; installed in CI',
+}, async t => {
+  const { tool, run } = await fixture(t);
+  const env = { DEPLOY_DATA_DIR: './services-data' };
+  assert.equal((await run(['server', '-c', 'true'], env)).status, 0);
+  const file = path.join(tool, '.deploy-keys', 'installation', 'known_hosts');
+  const before = await fs.readFile(file, 'utf8');
+  for (const key of ['garbage', 'ssh-ed25519 AAA\nHost *', 'ssh-rsa AAA', 'ssh-ed25519 ' + 'A'.repeat(68)]) {
+    const result = await run(['server', '-c', 'true'], { ...env, FAKE_HOST_KEY: key });
+    assert.equal(result.status, 1); assert.ok(!result.calls.some(c => c.args[0] === 'run'));
+    assert.equal(await fs.readFile(file, 'utf8'), before);
+  }
 });
 
 test('rejects root user and / workspace before invoking Docker', async t => {
-  const { run } = await fixture(t);
-  const root = await run([], { FAKE_UID: '0' });
-  assert.equal(root.status, 2);
-  assert.deepEqual(root.calls, []);
+  const { tool, run } = await fixture(t);
+  for (const args of [[], ['shell'], ['build'], ['stop'], ['down', '--all'], ['ps'], ['server'], ['services', 'up'], ['services', 'down']]) {
+    const root = await run(args, { FAKE_UID: '0' });
+    assert.equal(root.status, 2, JSON.stringify(args));
+    assert.deepEqual(root.calls, [], JSON.stringify(args));
+  }
+  assert.equal((await run(['--help'], { FAKE_UID: '0' })).status, 0);
+  for (const file of ['.services.lock', '.deploy-keys', '.runtime', 'data', 'services-data']) {
+    await assert.rejects(fs.access(path.join(tool, file)), { code: 'ENOENT' });
+  }
   const result = await run([], {}, '/');
   assert.equal(result.status, 2);
   assert.deepEqual(result.calls, []);

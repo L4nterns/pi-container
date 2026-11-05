@@ -6,10 +6,11 @@ services:
     image: ${DEPLOY_IMAGE:?由 devctl 命令设置}
     init: true
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    environment:
-      DEPLOY_PUBLIC_URL: ${DEPLOY_PUBLIC_URL:-}
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "127.0.0.1:${DEPLOY_PORT:-18080}:8080"
     volumes:
@@ -22,7 +23,8 @@ services:
       deployments:
         aliases: [app-services]
     healthcheck:
-      test: ["CMD", "node", "-e", "require('node:http').get('http://127.0.0.1:9000/healthz',r=>{r.resume();process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"]
+      test: ["CMD", "/opt/app-services/healthcheck.sh"]
+      start_period: 120s
       interval: 5s
       timeout: 3s
       retries: 12
