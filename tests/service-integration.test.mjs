@@ -15,6 +15,10 @@ test('real Debian SSH/SFTP, sudo, non-Node application, supervision and persiste
   timeout: 180000,
   skip: !base || process.getuid?.() !== 0 ? 'set TEST_SERVICE_ROOTFS to a disposable Debian rootfs with service dependencies; Docker smoke covers this in CI' : false,
 }, async t => {
+  // Fixture filesystem layout must not depend on the invoking sudo umask.
+  // The service entrypoint independently enforces 077 for private state.
+  const previousUmask = process.umask(0o022);
+  t.after(() => process.umask(previousUmask));
   for (const port of [2222, 8080, 20000]) {
     const probe = net.createServer();
     await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(port, '127.0.0.1', resolve); });
@@ -29,6 +33,10 @@ test('real Debian SSH/SFTP, sudo, non-Node application, supervision and persiste
   const ok = (args, options) => { const result = run(args, options); assert.equal(result.status, 0, result.stderr || result.stdout); return result.stdout; };
   let server;
   const serviceLog = path.join(root, 'run/service-launch.log');
+  async function diagnostics() {
+    const daemon = await fs.readFile(path.join(root, 'run/daemon.log'), 'utf8').catch(() => '');
+    return await fs.readFile(serviceLog, 'utf8') + '\n' + daemon;
+  }
   async function stop() {
     if (!server || server.exitCode !== null) return;
     server.kill('SIGTERM');
@@ -41,11 +49,11 @@ test('real Debian SSH/SFTP, sudo, non-Node application, supervision and persiste
     server = spawn('chroot', [root, '/opt/app-services/entrypoint.sh'], { env, stdio: ['ignore', out.fd, out.fd] });
     await out.close();
     for (let i = 0; i < 200; i++) {
-      assert.equal(server.exitCode, null, await fs.readFile(serviceLog, 'utf8'));
+      assert.equal(server.exitCode, null, await diagnostics());
       if (run(['/opt/app-services/healthcheck.sh']).status === 0) return;
       await delay(100);
     }
-    throw new Error('Service readiness failed: ' + await fs.readFile(serviceLog, 'utf8'));
+    throw new Error('Service readiness failed: ' + await diagnostics());
   }
   await fs.cp(path.join(repo, 'services'), path.join(root, 'opt/app-services'), { recursive: true });
   // Execute the Dockerfile's actual final assembly, including replacement of
@@ -56,8 +64,12 @@ test('real Debian SSH/SFTP, sudo, non-Node application, supervision and persiste
   assert.equal(await fs.readlink(path.join(root, 'etc/supervisor/supervisord.conf')), '/opt/app-services/supervisord.conf');
   await fs.copyFile(path.join(repo, 'dev-entrypoint.sh'), path.join(root, 'usr/local/bin/dev-entrypoint'));
   await fs.chmod(path.join(root, 'usr/local/bin/dev-entrypoint'), 0o755);
-  await fs.copyFile(path.join(repo, 'config/ssh-app-services.conf'), path.join(root, 'etc/ssh/ssh_config.d/50-app-services.conf'));
+  const sshConfig = path.join(root, 'etc/ssh/ssh_config.d/50-app-services.conf');
+  await fs.copyFile(path.join(repo, 'config/ssh-app-services.conf'), sshConfig);
+  await fs.chown(sshConfig, 0, 0);
+  await fs.chmod(sshConfig, 0o644);
   await fs.writeFile(path.join(root, 'etc/hosts'), `127.0.0.1 localhost app-services ${os.hostname()}\n`);
+  await fs.chmod(path.join(root, 'etc/hosts'), 0o644);
   // No /proc or devpts is mounted in this fixture. Use regular log sinks and
   // disable sudo's optional PTY wrapper ONLY here. Docker tests use real PTYs.
   for (const stream of ['stdout', 'stderr']) {

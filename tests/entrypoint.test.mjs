@@ -33,14 +33,20 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
 }, async t => {
   // Never touch the host account database. Copy only the entrypoint, real tools
   // and their libraries into a disposable filesystem, without bind mounts.
+  const previousUmask = process.umask(0o077);
+  t.after(() => process.umask(previousUmask));
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-entrypoint-rootfs-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.chmod(root, 0o755);
+  async function mkdir(directory) {
+    await fs.mkdir(directory, { recursive: true });
+    for (let current = directory; current !== root; current = path.dirname(current)) await fs.chmod(current, 0o755);
+  }
   const copied = new Set();
   async function copy(source, target = source) {
     if (copied.has(target)) return;
     const dest = path.join(root, target);
-    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await mkdir(path.dirname(dest));
     await fs.copyFile(source, dest);
     copied.add(target);
   }
@@ -55,7 +61,7 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
   }
   await copy(entrypoint, '/usr/bin/dev-entrypoint');
   for (const dir of ['etc', 'dev', 'tmp', 'var/log', 'var/mail', 'home/node/.pi/agent', 'run/deploy-credentials']) {
-    await fs.mkdir(path.join(root, dir), { recursive: true });
+    await mkdir(path.join(root, dir));
   }
   const files = {
     'etc/passwd': 'root:x:0:0:root:/root:/bin/sh\nnode:x:1000:1000::/home/node:/bin/bash\n',
@@ -70,7 +76,9 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
     'dev/null': '', // Only used as a writable sink; no real devices needed.
   };
   for (const [file, contents] of Object.entries(files)) {
-    await fs.writeFile(path.join(root, file), contents, { mode: file.endsWith('shadow') || file.startsWith('run/deploy-credentials/') ? 0o600 : 0o644 });
+    const mode = file.endsWith('shadow') || file.startsWith('run/deploy-credentials/') ? 0o600 : 0o644;
+    await fs.writeFile(path.join(root, file), contents, { mode });
+    await fs.chmod(path.join(root, file), mode);
   }
   await fs.chmod(path.join(root, 'dev/null'), 0o666);
   const env = { ...process.env, PATH: '/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/root', USER: 'root', LOGNAME: 'root' };

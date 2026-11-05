@@ -2,6 +2,9 @@
 # Container-only preparation for a root-owned host project. No host packages,
 # recursive chown, capabilities in user sessions, or access outside the bind.
 set -eu
+# Git's system trust configuration is non-secret and must be readable by the
+# unprivileged session even when the host caller uses umask 077.
+umask 022
 [ "$(id -u)" = 0 ] || { echo 'Workspace initialization requires container root' >&2; exit 1; }
 case "${1:-}" in
     ''|*[!0-9]*|0*) echo 'Invalid workspace UID' >&2; exit 1 ;;
