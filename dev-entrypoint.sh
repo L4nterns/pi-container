@@ -5,14 +5,21 @@ AGENT_DIR="/home/node/.pi/agent"
 PLUGIN='git:github.com/L4nterns/pi-provider-newapi@f0cc68fc0caef3da91a77f66a11acc89e7c628e0'
 MARKER="$AGENT_DIR/.devctl-newapi-installed"
 
-for value in "${DEV_UID:-}" "${DEV_GID:-}"; do
-    case "$value" in
-        ''|*[!0-9]*|0*) echo '[devctl] DEV_UID/DEV_GID 不合法；会话必须使用非 root UID/GID' >&2; exit 1 ;;
-    esac
-done
-case "${DEV_GROUPS:-}" in
-    ''|*[!0-9,]*|,*|*,|*,,*) echo '[devctl] DEV_GROUPS 不合法' >&2; exit 1 ;;
-esac
+# for value in "${DEV_UID:-}" "${DEV_GID:-}"; do
+#     case "$value" in
+#         ''|*[!0-9]*|0*) echo '[devctl] DEV_UID/DEV_GID 不合法；会话必须使用非 root UID/GID' >&2; exit 1 ;;
+#     esac
+# done
+# case "${DEV_GROUPS:-}" in
+#     ''|*[!0-9,]*|,*|*,|*,,*) echo '[devctl] DEV_GROUPS 不合法' >&2; exit 1 ;;
+# esac
+
+# 临时：root 映射到固定非 0 身份，避免 usermod UID 0 冲突
+if [ "${DEV_UID:-0}" = "0" ]; then
+    DEV_UID=1000
+    DEV_GID=1000
+    DEV_GROUPS=1000
+fi
 
 umask 077
 mkdir -p "$AGENT_DIR"

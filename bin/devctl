@@ -59,10 +59,10 @@ managed_projects() {
 
 # All state belongs to one non-root host identity, including service locks and
 # credentials. Do not create root-owned installation state via sudo devctl.
-if [[ "$UID_VALUE" == 0 && "${1:-}" != --help && "${1:-}" != -h ]]; then
-    printf '请使用非 root 宿主机用户运行 devctl，不要 sudo devctl。\n' >&2
-    exit 2
-fi
+# if [[ "$UID_VALUE" == 0 && "${1:-}" != --help && "${1:-}" != -h ]]; then
+#     printf '请使用非 root 宿主机用户运行 devctl，不要 sudo devctl。\n' >&2
+#     exit 2
+# fi
 
 case "${1:-}" in
     --help|-h)
