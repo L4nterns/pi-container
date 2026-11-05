@@ -5,21 +5,23 @@ SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
 REPO=$(cd -- "$(dirname -- "$SCRIPT")/.." && pwd -P)
 # shellcheck source=lib/session-lifecycle.sh
 source "$REPO/lib/session-lifecycle.sh"
+# shellcheck source=lib/deployment.sh
+source "$REPO/lib/deployment.sh"
 WORKDIR=$(pwd -P)
 UID_VALUE=$(id -u)
 HASH=$(printf '%s' "$WORKDIR" | sha256sum | cut -c1-16)
 REPO_HASH=$(printf '%s' "$REPO" | sha256sum | cut -c1-8)
-PROJECT="pi-r${REPO_HASH}-u${UID_VALUE}-${HASH}"
+PROJECT="dev-r${REPO_HASH}-u${UID_VALUE}-${HASH}"
 
 # All projects in this checkout share one image, but other checkouts cannot
 # overwrite it. Always derive the tag here for build, start and recreate alike.
-export PI_DOCKER_IMAGE="pi-docker:r${REPO_HASH}"
-export PI_WORKSPACE="$WORKDIR"
-export PUID="$UID_VALUE"
-PGID=$(id -g)
-PI_GROUPS=$(id -G | tr ' ' ',')
-export PGID PI_GROUPS
-export PI_SESSION_DIR="/home/node/.pi/agent/project-sessions/${UID_VALUE}-${HASH}"
+export DEV_IMAGE="devctl:r${REPO_HASH}"
+export DEV_WORKSPACE="$WORKDIR"
+export DEV_UID="$UID_VALUE"
+DEV_GID=$(id -g)
+DEV_GROUPS=$(id -G | tr ' ' ',')
+export DEV_GID DEV_GROUPS
+export DEV_SESSION_DIR="/home/node/.pi/agent/project-sessions/${UID_VALUE}-${HASH}"
 
 # Maintenance commands do not depend on optional publishing settings.
 CORE=(docker compose --project-directory "$REPO" \
@@ -27,7 +29,7 @@ CORE=(docker compose --project-directory "$REPO" \
 CURRENT=("${CORE[@]}" --project-name "$PROJECT")
 
 usage() {
-    printf '%s\n' '用法：pi [shell [Bash 参数...]|root-shell [Bash 参数...]|stop|down [--all]|ps|build [构建参数...]|rebuild [构建参数...]|recreate]'
+    printf '%s\n' '用法：devctl [shell [Bash 参数...]|stop|down [--all]|ps|build [构建参数...]|rebuild [构建参数...]|recreate|apps {list|status|logs|start|restart|stop|delete|verify} [app] [--yes]|services {up|stop|down|ps|logs|build|recreate}]'
 }
 
 init_lifecycle() {
@@ -43,7 +45,7 @@ managed_projects() {
     while IFS= read -r id; do
         [[ -n "$id" ]] || continue
         name=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$id") || return
-        [[ "$name" =~ ^pi-r${REPO_HASH}-u${UID_VALUE}-[0-9a-f]{16}$ ]] || continue
+        [[ "$name" =~ ^dev-r${REPO_HASH}-u${UID_VALUE}-[0-9a-f]{16}$ ]] || continue
         printf '%s\n' "$name"
     done <<< "$ids"
 }
@@ -111,7 +113,8 @@ case "${1:-}" in
     "")
         if (( $# )); then usage >&2; exit 2; fi
         ;;
-    shell|root-shell) ;;
+    shell) ;;
+    services|apps) ;;
     *)
         printf '未知命令：%s\n' "$1" >&2
         usage >&2
@@ -119,7 +122,11 @@ case "${1:-}" in
         ;;
 esac
 
-if [[ "$WORKDIR" == / ]]; then
+if [[ "$UID_VALUE" == 0 && "${1:-}" != services ]]; then
+    printf '请使用非 root 宿主机用户运行 devctl，不要 sudo devctl。\n' >&2
+    exit 2
+fi
+if [[ "$WORKDIR" == / && "${1:-}" != apps && "${1:-}" != services ]]; then
     printf '拒绝将宿主机根目录 / 挂载为工作区；请先进入具体项目目录\n' >&2
     exit 2
 fi
@@ -129,36 +136,47 @@ if [[ ! -f "$ENV_FILE" ]]; then ENV_FILE="$REPO/.env.example"; fi
 COMPOSE=(docker compose --project-directory "$REPO" --project-name "$PROJECT" \
     --file "$REPO/compose.yaml" --env-file "$ENV_FILE")
 
-# Let Compose parse dotenv once, instead of maintaining a second, incompatible parser.
-# The resolved values are then validated and exported for all subsequent commands.
-CONFIG_ENV=$("${COMPOSE[@]}" config --environment)
-read_config_value() {
-    local line
-    while IFS= read -r line; do
-        if [[ "$line" == "$1="* ]]; then printf '%s' "${line#*=}"; return; fi
-    done <<< "$CONFIG_ENV"
-}
-VIBE_DIR=$(read_config_value VIBE_PROJECTS_HOST_DIR)
-VIBE_URL=$(read_config_value VIBE_PUBLIC_URL)
-
-if [[ -n "$VIBE_DIR" || -n "$VIBE_URL" ]]; then
-    if [[ -z "$VIBE_DIR" || -z "$VIBE_URL" ]]; then
-        printf '请同时设置 VIBE_PROJECTS_HOST_DIR 和 VIBE_PUBLIC_URL\n' >&2
-        exit 1
+deployment_config
+if [[ "${1:-}" == apps ]]; then
+    shift
+    case "${1:-}" in
+        list) (( $# == 1 )) || { usage >&2; exit 2; } ;;
+        status|logs|start|restart|stop|verify) (( $# == 2 )) || { usage >&2; exit 2; } ;;
+        delete) (( $# == 3 )) && [[ "$3" == --yes ]] || { usage >&2; exit 2; } ;;
+        *) usage >&2; exit 2 ;;
+    esac
+    if (( $# > 1 )) && [[ ! "$2" =~ ^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$ ]]; then
+        printf '应用名不合法。\n' >&2; exit 2
     fi
-    if [[ "$VIBE_DIR" != /* || ! -d "$VIBE_DIR" || ! -w "$VIBE_DIR" ]]; then
-        printf '发布目录必须是已存在、可写的绝对路径：%s\n' "$VIBE_DIR" >&2
-        exit 1
-    fi
-    VIBE_DIR=$(realpath -e -- "$VIBE_DIR")
-    if [[ "$VIBE_DIR" == / || "$VIBE_DIR" == "$WORKDIR" || "$VIBE_DIR" == "$WORKDIR/"* || "$WORKDIR" == "$VIBE_DIR/"* ||
-          "$VIBE_DIR" == "$REPO" || "$REPO" == "$VIBE_DIR/"* || "$VIBE_DIR" == "$REPO/data" || "$VIBE_DIR" == "$REPO/data/"* ]]; then
-        printf '发布目录不能覆盖工作目录、工具仓库或 Pi 配置数据\n' >&2
-        exit 1
-    fi
-    export VIBE_PROJECTS_HOST_DIR="$VIBE_DIR"
-    export VIBE_PUBLIC_URL="$VIBE_URL"
-    COMPOSE+=(--file "$REPO/compose.vibe.yaml")
+    provision_deployment
+    docker run --rm --security-opt no-new-privileges \
+        --network "$DEPLOY_NETWORK" \
+        --mount "type=bind,source=$DEPLOY_CREDENTIAL_DIR,target=/run/deploy-credentials,readonly" \
+        --env "DEPLOY_PUBLIC_URL=$DEPLOY_PUBLIC_URL" \
+        --env "DEV_UID=$DEV_UID" --env "DEV_GID=$DEV_GID" --env "DEV_GROUPS=$DEV_GROUPS" \
+        --entrypoint /usr/local/bin/dev-entrypoint "$DEV_IMAGE" --appctl "$@"
+    exit $?
+fi
+if [[ "${1:-}" == services ]]; then
+    if (( $# != 2 )); then usage >&2; exit 2; fi
+    deployment_require_config
+    exec {services_fd}>>"$REPO/.services.lock"
+    flock -x "$services_fd"
+    case "$2" in
+        up) "${SERVICE_COMPOSE[@]}" up -d --wait --no-recreate services ;;
+        stop) "${SERVICE_COMPOSE[@]}" stop services ;;
+        down) "${SERVICE_COMPOSE[@]}" down --remove-orphans ;;
+        ps) "${SERVICE_COMPOSE[@]}" ps ;;
+        logs) "${SERVICE_COMPOSE[@]}" logs --tail 200 services ;;
+        build) "${SERVICE_COMPOSE[@]}" build services ;;
+        recreate) "${SERVICE_COMPOSE[@]}" up -d --wait --force-recreate --no-build services ;;
+        *) usage >&2; exit 2 ;;
+    esac
+    exit 0
+fi
+deployment_require_workspace
+if [[ -n "$DEPLOY_DATA_DIR" ]]; then
+    provision_deployment
 fi
 
 mkdir -p -- "$REPO/data"
@@ -198,14 +216,10 @@ case "${1:-}" in
             shell)
                 shift
                 "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi \
-                    /usr/local/bin/pi-entrypoint --pi-docker-shell "$@"
-                ;;
-            root-shell)
-                shift
-                "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --env HOME=/root --workdir /workspace pi bash "$@"
+                    /usr/local/bin/dev-entrypoint --dev-shell "$@"
                 ;;
             "")
-                "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi /usr/local/bin/pi-entrypoint
+                "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi /usr/local/bin/dev-entrypoint
                 ;;
         esac
         ;;

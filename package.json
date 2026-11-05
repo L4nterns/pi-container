@@ -1,5 +1,5 @@
 {
-  "name": "pi-docker",
+  "name": "devctl",
   "private": true,
   "license": "MIT",
   "scripts": {

@@ -2,7 +2,10 @@
 .env.*
 !.env.example
 data/
+services-data/
 .runtime/
+.deploy-keys/
+.services.lock
 node_modules/
 workspace/
 .git/
