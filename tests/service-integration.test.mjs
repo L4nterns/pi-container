@@ -88,11 +88,14 @@ test('real Debian SSH/SFTP, sudo, non-Node application, supervision and persiste
   assert.notEqual(run(['deploy-register', 'ssh-ed25519 ' + 'A'.repeat(68)]).status, 0, 'reject structurally invalid keys');
   assert.equal(await fs.readFile(authorized, 'utf8'), before);
   await fs.writeFile(path.join(credentials, 'known_hosts'), '[app-services]:2222 ' + hostKey + '\n', { mode: 0o600 });
-  ok(['chown', '-R', '12345:12345', '/run/deploy-credentials']);
+  ok(['chmod', '0700', '/run/deploy-credentials']);
   const clientRun = script => run(['/usr/local/bin/dev-entrypoint', '--dev-shell', '-ec', script], { env: { ...env, DEV_UID: '12345', DEV_GID: '12345', DEV_GROUPS: '12345' } });
   const client = script => { const result = clientRun(script); assert.equal(result.status, 0, result.stderr || result.stdout); return result.stdout; };
   assert.equal(client("ssh app-services 'id -u; sudo -n id -u'").trim(), '19000\n0');
   assert.equal(client("ssh app-services 'printf normal-command'").trim(), 'normal-command');
+  assert.equal((await fs.stat(path.join(credentials, 'id_ed25519'))).uid, 0);
+  assert.equal((await fs.stat(path.join(credentials, 'id_ed25519'))).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(path.join(root, 'run/devctl-ssh/id_ed25519'))).uid, 12345);
   assert.equal(clientRun("ssh app-services 'exit 37'").status, 37);
   // Run the same Bash contract through both real entrypoint modes. SSH must
   // preserve argument boundaries rather than interpreting them a second time.

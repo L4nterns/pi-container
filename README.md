@@ -14,20 +14,43 @@
 
 - Linux、Bash 4.1+、GNU coreutils、`flock` 和 OpenSSH 客户端。
 - 本机 Docker Engine / Compose v2，支持 `config --environment`、`up --wait`；未验证 Podman。
-- 非 root 宿主用户，具有 Docker 权限，安装目录与项目目录可写。
+- 宿主 root 或普通用户，具有 Docker 权限，安装目录与项目目录可写；同一安装固定使用一个宿主身份。
 - 公网访问需已有宿主 Nginx、DNS 和 TLS。WSL 使用 Linux 环境；不支持原生 PowerShell 或远程 Docker 引擎。
 
 ```bash
 git clone https://github.com/L4nterns/pi-docker.git ~/devctl
 cd ~/devctl
 cp .env.example .env    # 已有 .env 时只编辑，不覆盖
-mkdir -p ~/.local/bin
-ln -s "$(pwd -P)/bin/devctl" ~/.local/bin/devctl
+if [ "$(id -u)" = 0 ]; then
+    BIN_DIR=/usr/local/bin
+else
+    BIN_DIR="$HOME/.local/bin"
+fi
+mkdir -p "$BIN_DIR"
+ln -s "$(pwd -P)/bin/devctl" "$BIN_DIR/devctl"
+export PATH="$BIN_DIR:$PATH"
+command -v devctl
 cd ~/projects/my-app
 devctl
 ```
 
-确保 `~/.local/bin` 位于 PATH，不覆盖未知同名命令。工作区挂载为 `/workspace`；禁止从根目录、安装目录或包含安装秘密/部署状态的父目录启动开发会话。宿主 `pi` 不受影响，容器中的 `pi` 是上游 CLI。
+不覆盖未知同名命令；`ln` 报文件已存在时先核对目标。`export` 立即作用于当前终端；root 使用的 `/usr/local/bin` 通常已在登录 PATH 中。普通用户应在 `~/.bashrc` 添加以下设置，使后续交互式 Bash 也能直接使用 `devctl`（已有相同设置则不重复添加）：
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+登录 Bash 只读第一个存在的 `~/.bash_profile`、`~/.bash_login`、`~/.profile`；该文件需要加载 `~/.bashrc`，或直接包含上述 PATH 设置。其他 Shell 在各自启动文件配置 PATH。已将软链接装到 `~/.local/bin` 的 root 也可使用上述设置，无需移动或重新安装。
+
+工作区挂载为 `/workspace`；禁止从根目录、安装目录或包含安装秘密/部署状态的父目录启动开发会话。宿主 `pi` 不受影响，容器中的 `pi` 是上游 CLI。
+
+### 宿主身份与工作区访问
+
+普通宿主用户的 UID/GID 与附加组用于开发会话；宿主 root 则映射为容器内 UID/GID 1000、仅组 1000。Pi 和开发 Shell 都不以 root 运行，仍清空能力并开启 no-new-privileges。宿主容器名称、会话索引和维护锁按实际宿主身份区分。
+
+root 启动开发会话时，镜像内的 ACL 工具为工作区中 root 所有的目录/文件授予 UID 1000 必要的读写/遍历权限，目录设置默认 ACL；不递归改所有者，不跟随符号链接、不递归进入其他文件系统。ACL 是对宿主工作区元数据的实际修改，并会保留；产生的新文件通常归 UID 1000。工作区中的 root 所有 Git 仓库仅在容器内获得 `/workspace` 范围的所有权信任，不全局信任所有目录。**同机真实 UID 1000 也会获得这些文件的访问权**，应选择可信、专用于开发的项目目录，不放入无关秘密。不要混用不同宿主用户管理同一安装。
+
+`acl` 只安装在开发镜像，宿主无需安装包。底层文件系统必须支持 POSIX ACL；不支持或授权失败时拒绝打开会话，不改用 root 运行。`devctl server` 不挂载工作区，也不修改其 ACL。宿主私钥保持原所有者和严格权限，只读挂载后在容器临时内存目录中生成开发身份可读的副本，容器停止即丢弃。
 
 首次构建开发镜像并安装固定提交的 [NewAPI provider](https://github.com/L4nterns/pi-provider-newapi)。在 Pi 使用 `/newapi-provider-add newapi`、`/login newapi`、`/model` 配置。开发镜像使用官方 Node 镜像运行 Pi；服务镜像直接基于 `debian:trixie-slim`，按应用需要通过 SSH 安装运行时与系统依赖。基础镜像锁定摘要、Pi 使用锁文件、provider 固定 Git 提交；Debian 包接受安全更新，构建和依赖安装需要网络。
 

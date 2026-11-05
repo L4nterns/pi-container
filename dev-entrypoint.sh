@@ -5,21 +5,22 @@ AGENT_DIR="/home/node/.pi/agent"
 PLUGIN='git:github.com/L4nterns/pi-provider-newapi@f0cc68fc0caef3da91a77f66a11acc89e7c628e0'
 MARKER="$AGENT_DIR/.devctl-newapi-installed"
 
-# for value in "${DEV_UID:-}" "${DEV_GID:-}"; do
-#     case "$value" in
-#         ''|*[!0-9]*|0*) echo '[devctl] DEV_UID/DEV_GID 不合法；会话必须使用非 root UID/GID' >&2; exit 1 ;;
-#     esac
-# done
-# case "${DEV_GROUPS:-}" in
-#     ''|*[!0-9,]*|,*|*,|*,,*) echo '[devctl] DEV_GROUPS 不合法' >&2; exit 1 ;;
-# esac
-
-# 临时：root 映射到固定非 0 身份，避免 usermod UID 0 冲突
-if [ "${DEV_UID:-0}" = "0" ]; then
-    DEV_UID=1000
-    DEV_GID=1000
-    DEV_GROUPS=1000
-fi
+for value in "${DEV_UID:-}" "${DEV_GID:-}"; do
+    case "$value" in
+        ''|*[!0-9]*|0*) echo '[devctl] DEV_UID/DEV_GID 不合法；会话必须使用非 root UID/GID' >&2; exit 1 ;;
+    esac
+done
+case "${DEV_GROUPS:-}" in
+    ''|*[!0-9,]*|,*|*,|*,,*) echo '[devctl] DEV_GROUPS 不合法' >&2; exit 1 ;;
+esac
+# Validate each numeric group, not just the comma-separated string. Group 0 is
+# not part of any development session, including those started by host root.
+old_ifs=$IFS
+IFS=,
+for group in $DEV_GROUPS; do
+    case "$group" in 0|0[0-9]*) echo '[devctl] DEV_GROUPS 不合法' >&2; exit 1 ;; esac
+done
+IFS=$old_ifs
 
 umask 077
 mkdir -p "$AGENT_DIR"
@@ -41,6 +42,20 @@ chown "$DEV_UID:$DEV_GID" /home/node /home/node/.pi
 find "$AGENT_DIR" -xdev \( ! -uid "$DEV_UID" -o ! -gid "$DEV_GID" \) \
     -exec chown -h "$DEV_UID:$DEV_GID" {} +
 chmod 700 "$AGENT_DIR"
+
+# The host mount stays read-only with its original owner/modes, including
+# root:root/0600 keys. Stage only what OpenSSH needs into container-local tmpfs.
+if [ -d /run/deploy-credentials ]; then
+    install -d -m 0711 -o 0 -g 0 /run/devctl-ssh
+    for name in id_ed25519 known_hosts; do
+        temporary=$(mktemp /run/devctl-ssh/.credential.XXXXXXXX)
+        if ! install -m 0600 -o "$DEV_UID" -g "$DEV_GID" "/run/deploy-credentials/$name" "$temporary"; then
+            rm -f "$temporary"
+            exit 1
+        fi
+        mv -fT "$temporary" "/run/devctl-ssh/$name"
+    done
+fi
 
 if [ "${1:-}" != '--dev-shell' ] && [ "${1:-}" != '--service-shell' ]; then
     installed=''
@@ -79,7 +94,7 @@ if [ "${1:-}" = '--dev-shell' ]; then
     shift
     exec setpriv --reuid "$DEV_UID" --regid "$DEV_GID" --groups "$DEV_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all bash "$@"
 fi
-if [ -r /run/deploy-credentials/known_hosts ]; then
+if [ -r /run/devctl-ssh/known_hosts ]; then
     set -- --skill /opt/devctl/skills/app-deployment "$@"
 fi
 exec setpriv --reuid "$DEV_UID" --regid "$DEV_GID" --groups "$DEV_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all pi "$@"

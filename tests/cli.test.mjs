@@ -37,17 +37,21 @@ printf 'test-only-not-a-key' > "$2"
 printf '%s\\n' '${hostKey}' > "$2.pub"
 `, { mode: 0o755 });
   await fs.writeFile(path.join(fakeBin, 'id'), `#!/bin/sh
-case "$1" in -u|-g) printf '%s\\n' "\${FAKE_UID:-1000}" ;; -G) printf '1000\\n' ;; esac
+case "$1" in -u) printf '%s\\n' "\${FAKE_UID:-1000}" ;; -g) printf '%s\\n' "\${FAKE_GID:-1000}" ;; -G) printf '%s\\n' "\${FAKE_GROUPS:-1000}" ;; esac
 `, { mode: 0o755 });
   // No daemon: record invocations at the Docker CLI boundary, not inside the wrapper.
   await fs.writeFile(path.join(fakeBin, 'docker'), `#!${process.execPath}
 const fs = require('node:fs');
 const args = process.argv.slice(2);
-fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ args, workspace: process.env.DEV_WORKSPACE, image: process.env.DEV_IMAGE, deployData: process.env.DEPLOY_DATA_DIR }) + '\\n');
+fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ args, workspace: process.env.DEV_WORKSPACE, uid: process.env.DEV_UID, gid: process.env.DEV_GID, groups: process.env.DEV_GROUPS, session: process.env.DEV_SESSION_DIR, image: process.env.DEV_IMAGE, deployData: process.env.DEPLOY_DATA_DIR }) + '\\n');
 if (args.includes('config') && args.includes('--environment')) {
   for (const key of ['DEPLOY_DATA_DIR', 'DEPLOY_PUBLIC_URL', 'DEPLOY_PORT']) console.log(key + '=' + (process.env[key] || ''));
 } else if (args.includes('/usr/local/bin/deploy-register')) {
   console.log(process.env.FAKE_HOST_KEY || ${JSON.stringify(hostKey)});
+} else if (args.includes('up')) {
+  process.exitCode = Number(process.env.FAKE_UP_EXIT || 0);
+} else if (args.includes('/usr/local/bin/dev-workspace-init')) {
+  process.exitCode = Number(process.env.FAKE_WORKSPACE_EXIT || 0);
 } else if (args.includes('ps') && args.includes('-q')) {
   console.log('fake-container');
 } else if (args[0] === 'inspect') {
@@ -284,18 +288,54 @@ test('real OpenSSH rejects malformed enrollment without replacing the trusted ho
   }
 });
 
-test('rejects root user and / workspace before invoking Docker', async t => {
-  const { tool, run } = await fixture(t);
-  for (const args of [[], ['shell'], ['build'], ['stop'], ['down', '--all'], ['ps'], ['server'], ['services', 'up'], ['services', 'down']]) {
-    const root = await run(args, { FAKE_UID: '0' });
-    assert.equal(root.status, 2, JSON.stringify(args));
-    assert.deepEqual(root.calls, [], JSON.stringify(args));
+test('host root maps to non-root development identity, but retains host-scoped lifecycle names', async t => {
+  const { run } = await fixture(t);
+  const root = { FAKE_UID: '0', FAKE_GID: '0', FAKE_GROUPS: '0,27' };
+  for (const args of [[], ['shell', '-c', 'id'], ['recreate'], ['server', '-c', 'id'], ['services', 'up'], ['build'], ['stop'], ['down'], ['ps']]) {
+    const result = await run(args, { ...root, DEPLOY_DATA_DIR: './services-data', DEV_UID: '0', DEV_GID: '0', DEV_GROUPS: '0' });
+    assert.equal(result.status, 0, `${JSON.stringify(args)}: ${result.stderr}`);
+    assert.ok(result.calls.length);
+    for (const call of result.calls) {
+      assert.equal(call.uid, '1000'); assert.equal(call.gid, '1000'); assert.equal(call.groups, '1000');
+      assert.match(call.session, /project-sessions\/0-[0-9a-f]{16}$/);
+    }
+    const prepare = result.calls.findIndex(c => c.args.includes('/usr/local/bin/dev-workspace-init'));
+    if (!args.length || args[0] === 'shell') {
+      assert.ok(prepare >= 0);
+      assert.ok(result.calls.findIndex(c => c.args.includes('--dev-shell') || (c.args.includes('exec') && c.args.at(-1) === '/usr/local/bin/dev-entrypoint')) > prepare);
+      assert.equal(result.calls[prepare].args.at(-1), '1000');
+      const up = result.calls.find(c => c.args.includes('up') && c.args.includes('pi'));
+      assert.match(up.args[up.args.indexOf('--project-name') + 1], /^dev-r[0-9a-f]{8}-u0-[0-9a-f]{16}$/);
+    } else assert.equal(prepare, -1, 'maintenance and remote-only sessions must not modify workspace ACLs');
+    if (args[0] === 'server') {
+      const client = result.calls.find(c => c.args[0] === 'run');
+      assert.ok(client.args.includes('DEV_UID=1000'));
+      assert.ok(client.args.includes('DEV_GID=1000'));
+      assert.ok(client.args.includes('DEV_GROUPS=1000'));
+      assert.ok(client.args.includes('--tmpfs'));
+    }
   }
-  assert.equal((await run(['--help'], { FAKE_UID: '0' })).status, 0);
-  for (const file of ['.services.lock', '.deploy-keys', '.runtime', 'data', 'services-data']) {
-    await assert.rejects(fs.access(path.join(tool, file)), { code: 'ENOENT' });
+});
+
+test('workspace preparation errors preserve failure and never open a session', async t => {
+  const { run } = await fixture(t);
+  const root = { FAKE_UID: '0', FAKE_GID: '0', FAKE_GROUPS: '0' };
+  const upFailed = await run(['shell'], { ...root, FAKE_UP_EXIT: '19' });
+  assert.equal(upFailed.status, 19);
+  assert.ok(!upFailed.calls.some(c => c.args.includes('exec')));
+  const accessFailed = await run(['shell'], { ...root, FAKE_WORKSPACE_EXIT: '21' });
+  assert.equal(accessFailed.status, 21);
+  assert.ok(!accessFailed.calls.some(c => c.args.includes('--dev-shell') || c.args.includes('stop')));
+  const ordinary = await run(['shell']);
+  assert.equal(ordinary.status, 0, ordinary.stderr);
+  assert.ok(!ordinary.calls.some(c => c.args.includes('/usr/local/bin/dev-workspace-init')));
+});
+
+test('rejects / workspace even for host root, without invoking Docker', async t => {
+  const { run } = await fixture(t);
+  for (const env of [{}, { FAKE_UID: '0', FAKE_GID: '0', FAKE_GROUPS: '0' }]) {
+    const result = await run([], env, '/');
+    assert.equal(result.status, 2);
+    assert.deepEqual(result.calls, []);
   }
-  const result = await run([], {}, '/');
-  assert.equal(result.status, 2);
-  assert.deepEqual(result.calls, []);
 });

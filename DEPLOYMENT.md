@@ -8,7 +8,7 @@
 - `deploy` 可通过 `sudo -n` 获得**服务容器内完整 root 权限**。这也意味着可以执行 root Shell；禁止 root SSH 登录不是容器内提权限制。
 - 应用使用独立非 root 用户，前台运行。不要使用管理用户或 root 承载应用。
 - 开发容器仍启用 no-new-privileges 并清空能力；通过 SSH 登录的是另一容器中的独立进程，不继承客户端的降权状态。服务容器不能启用该选项，否则 sudo 失效。
-- SSH 主机密钥由宿主直接登记，严格校验。不开放宿主 SSH 端口，不挂载 Docker socket，不使用 privileged。支持终端和 SFTP，禁用密码、代理及端口转发。
+- SSH 主机密钥由宿主直接登记，严格校验。宿主私钥只读挂载，入口将必要凭据复制到容器内临时内存目录供非 root 客户端读取，不放宽宿主私钥权限；宿主 root 同样可使用。不开放宿主 SSH 端口，不挂载 Docker socket，不使用 privileged。支持终端和 SFTP，禁用密码、代理及端口转发。
 
 ```bash
 ssh app-services 'id; sudo -n id'

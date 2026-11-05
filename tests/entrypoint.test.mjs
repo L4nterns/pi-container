@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import './helpers/workspace-access.mjs';
 
 const entrypoint = fileURLToPath(new URL('../dev-entrypoint.sh', import.meta.url));
 const ssh = process.env.TEST_SSH_BINARY || '/usr/bin/ssh';
@@ -13,6 +14,7 @@ const hasSsh = await fs.access(ssh).then(() => true, () => false);
 test('rejects invalid UID/GID/groups before initialization or running a command', () => {
   const invalid = [
     { DEV_UID: '' }, { DEV_UID: '0' }, { DEV_UID: '-1' }, { DEV_UID: '1:2' }, { DEV_GID: '' }, { DEV_GID: '0' }, { DEV_GID: '1:2' },
+    { DEV_GROUPS: '0' }, { DEV_GROUPS: '1000,0' }, { DEV_GROUPS: '01000' },
     { DEV_GROUPS: '' }, { DEV_GROUPS: '0,,1' }, { DEV_GROUPS: ',1' }, { DEV_GROUPS: '1,' }, { DEV_GROUPS: 'abc' },
   ];
   for (const values of invalid) {
@@ -42,7 +44,7 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
     await fs.copyFile(source, dest);
     copied.add(target);
   }
-  for (const name of ['sh', 'bash', 'mkdir', 'flock', 'getent', 'groupadd', 'usermod', 'id', 'chown', 'find', 'chmod', 'head', 'setpriv', 'ssh']) {
+  for (const name of ['sh', 'bash', 'mkdir', 'flock', 'getent', 'groupadd', 'usermod', 'id', 'chown', 'find', 'chmod', 'head', 'setpriv', 'ssh', 'install', 'mktemp', 'mv', 'rm']) {
     const lookup = spawnSync('sh', ['-c', 'command -v "$1"', '_', name], { encoding: 'utf8' });
     const source = name === 'ssh' ? ssh : lookup.stdout.trim();
     assert.ok(source, `${name} must be installed`);
@@ -52,7 +54,7 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
     for (const match of deps.stdout.matchAll(/(?:=>\s+|^\s*)(\/\S+)/gm)) await copy(match[1]);
   }
   await copy(entrypoint, '/usr/bin/dev-entrypoint');
-  for (const dir of ['etc', 'dev', 'tmp', 'var/log', 'var/mail', 'home/node/.pi/agent']) {
+  for (const dir of ['etc', 'dev', 'tmp', 'var/log', 'var/mail', 'home/node/.pi/agent', 'run/deploy-credentials']) {
     await fs.mkdir(path.join(root, dir), { recursive: true });
   }
   const files = {
@@ -63,10 +65,12 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
     'etc/nsswitch.conf': 'passwd: files\ngroup: files\nshadow: files\n',
     'etc/login.defs': 'MAIL_DIR /var/mail\n',
     'etc/ssh_config': '',
+    'run/deploy-credentials/id_ed25519': 'root-private-test-content\n',
+    'run/deploy-credentials/known_hosts': 'root-known-host-test-content\n',
     'dev/null': '', // Only used as a writable sink; no real devices needed.
   };
   for (const [file, contents] of Object.entries(files)) {
-    await fs.writeFile(path.join(root, file), contents, { mode: file.endsWith('shadow') ? 0o600 : 0o644 });
+    await fs.writeFile(path.join(root, file), contents, { mode: file.endsWith('shadow') || file.startsWith('run/deploy-credentials/') ? 0o600 : 0o644 });
   }
   await fs.chmod(path.join(root, 'dev/null'), 0o666);
   const env = { ...process.env, PATH: '/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/root', USER: 'root', LOGNAME: 'root' };
@@ -95,5 +99,15 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
     const agent = await fs.stat(path.join(root, 'home/node/.pi/agent'));
     assert.equal(agent.uid, uid);
     assert.equal(agent.gid, gid);
+    for (const name of ['id_ed25519', 'known_hosts']) {
+      const original = path.join(root, 'run/deploy-credentials', name);
+      const staged = path.join(root, 'run/devctl-ssh', name);
+      assert.equal((await fs.stat(original)).uid, 0);
+      assert.equal((await fs.stat(original)).mode & 0o777, 0o600);
+      assert.equal((await fs.stat(staged)).uid, uid);
+      assert.equal((await fs.stat(staged)).gid, gid);
+      assert.equal((await fs.stat(staged)).mode & 0o777, 0o600);
+      assert.equal(await fs.readFile(staged, 'utf8'), await fs.readFile(original, 'utf8'));
+    }
   }
 });

@@ -7,6 +7,8 @@ services:
     security_opt:
       - no-new-privileges:true
     entrypoint: ["sleep", "infinity"]
+    tmpfs:
+      - /run/devctl-ssh:rw,noexec,nosuid,nodev,mode=0700
     environment:
       DEV_UID: ${DEV_UID:?由 devctl 命令设置}
       DEV_GID: ${DEV_GID:?由 devctl 命令设置}

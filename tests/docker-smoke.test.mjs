@@ -27,6 +27,7 @@ else if(args[0]==='logs') console.log('injected startup failure');
 else if(args[0]==='exec') {
   if(args.includes('/opt/app-services/healthcheck.sh')) process.exitCode=process.env.READY==='yes'?0:1;
   else if(args.includes('deploy-register')) console.log(key);
+  else if(args.includes('dev-entrypoint')&&args.at(-1)==='cat /workspace/root-only') process.exitCode=1;
   else if(args.includes('cat')&&args.includes('/srv/app-services/ssh/ssh_host_ed25519_key.pub')) console.log(key);
   else if(args.some(a=>a.includes('exit 37'))||(args.includes('dev-entrypoint')&&args.includes('-s'))) process.exitCode=37;
   else if(args.includes('curl')) console.log(args.includes('%{http_code}')?'404':'Hello from Python');

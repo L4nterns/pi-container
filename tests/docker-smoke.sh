@@ -71,14 +71,53 @@ docker run --rm --entrypoint ssh-keygen --mount "type=bind,source=$TMP/keys,targ
 HOST_KEY=$(docker exec "$SERVICE" deploy-register "$(<"$TMP/keys/id_ed25519.pub")")
 [[ "$HOST_KEY" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}$ ]] || { printf 'Invalid SSH host key\n' >&2; exit 1; }
 printf '[app-services]:2222 %s\n' "$HOST_KEY" > "$TMP/keys/known_hosts"
-docker run --rm --entrypoint chown --mount "type=bind,source=$TMP/keys,target=/keys" "$IMAGE" -Rh 12345:12345 /keys
+docker run --rm --entrypoint /bin/sh --mount "type=bind,source=$TMP/keys,target=/keys" "$IMAGE" -ec \
+    'chown -R 0:0 /keys; chmod 0700 /keys; chmod 0600 /keys/id_ed25519 /keys/known_hosts'
 docker run -d --name "$DEV" --init --security-opt no-new-privileges:true --network "$NETWORK" \
     --mount "type=bind,source=$TMP/agent,target=/home/node/.pi/agent" \
     --mount "type=bind,source=$TMP/workspace,target=/workspace" \
     --mount "type=bind,source=$TMP/keys,target=/run/deploy-credentials,readonly" \
+    --tmpfs /run/devctl-ssh:rw,noexec,nosuid,nodev,mode=0700 \
     --env DEV_UID=12345 --env DEV_GID=12345 --env DEV_GROUPS=12345 \
     --entrypoint sleep "$IMAGE" infinity
 client() { docker exec -i "$DEV" dev-entrypoint --dev-shell -ec "$1"; }
+# Root-owned project metadata is accessible only after explicit ACL preparation.
+docker exec "$DEV" sh -ec '
+    chown 0:0 /workspace; chmod 0700 /workspace
+    printf original > /workspace/root-only; chmod 0600 /workspace/root-only
+    printf private > /tmp/outside-workspace; chmod 0600 /tmp/outside-workspace
+    ln -s /tmp/outside-workspace /workspace/external-link
+    mkdir /workspace/root-project
+    git -C /workspace/root-project init --quiet
+'
+if client 'cat /workspace/root-only'; then echo 'Root-only workspace unexpectedly readable before initialization' >&2; exit 1; fi
+docker exec "$DEV" /usr/local/bin/dev-workspace-init 12345
+# Variables are evaluated by the development shell, not the host.
+# shellcheck disable=SC2016
+client '
+    test "$(cat /workspace/root-only)" = original
+    test "$(stat -c %u /workspace/root-only)" = 0
+    printf updated > /workspace/root-only
+    printf new > /workspace/created-by-developer
+    test "$(stat -c %u /workspace/created-by-developer)" = 12345
+    if cat /workspace/external-link; then exit 1; fi
+    git -C /workspace/root-project status --porcelain
+    test "$(stat -c %u:%a /run/devctl-ssh/id_ed25519)" = 12345:600
+'
+docker exec "$DEV" sh -ec '
+    test "$(stat -c %u:%g:%a /run/deploy-credentials/id_ed25519)" = 0:0:600
+    test "$(stat -c %a /tmp/outside-workspace)" = 600
+    test "$(stat -c %u /workspace/root-project/.git)" = 0
+'
+# Host-root's fixed runtime identity also works without root or group 0.
+docker exec "$DEV" /usr/local/bin/dev-workspace-init 1000
+docker exec -e DEV_UID=1000 -e DEV_GID=1000 -e DEV_GROUPS=1000 "$DEV" dev-entrypoint --dev-shell -ec '
+    test "$(id -u):$(id -g):$(id -G)" = 1000:1000:1000
+    printf root-session > /workspace/root-only
+    test "$(stat -c %u /workspace/root-only)" = 0
+    git -C /workspace/root-project status --porcelain
+    ssh app-services "test \"\$(id -u)\" = 19000; sudo -n true"
+'
 # Variables expand in the remote shell, not the host.
 # shellcheck disable=SC2016
 client '
@@ -176,11 +215,14 @@ done
 exit 1
 REMOTE
 wait_app
+# Test fixture changed the temporary workspace owner to root. Remove source
+# through container root so this also runs on a non-root CI host, then stop it.
+docker exec "$DEV" sh -ec 'rm -rf /workspace/reviewed; test ! -e /workspace/reviewed'
 docker stop "$DEV" >/dev/null
-rm -rf -- "$TMP/workspace/reviewed"
 # Same path as devctl server: no source/Pi bind mount, numeric NSS initialization.
 standalone() {
     docker run --rm --init --pull never -i --security-opt no-new-privileges:true --network "$NETWORK" \
+        --tmpfs /run/devctl-ssh:rw,noexec,nosuid,nodev,mode=0700 \
         --env DEV_UID=12345 --env DEV_GID=12345 --env DEV_GROUPS=12345 \
         --mount "type=bind,source=$TMP/keys,target=/run/deploy-credentials,readonly" \
         --entrypoint /usr/local/bin/dev-entrypoint "$IMAGE" --service-shell "$@"

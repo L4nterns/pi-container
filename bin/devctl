@@ -20,7 +20,14 @@ export DEV_WORKSPACE="$WORKDIR"
 export DEV_UID="$UID_VALUE"
 DEV_GID=$(id -g)
 DEV_GROUPS=$(id -G | tr ' ' ',')
-export DEV_GID DEV_GROUPS
+# Host lifecycle/state use the caller's real identity. Root never becomes the
+# identity of Pi or a development shell, nor contributes supplementary group 0.
+if [[ "$UID_VALUE" == 0 ]]; then
+    DEV_UID=1000
+    DEV_GID=1000
+    DEV_GROUPS=1000
+fi
+export DEV_UID DEV_GID DEV_GROUPS
 export DEV_SESSION_DIR="/home/node/.pi/agent/project-sessions/${UID_VALUE}-${HASH}"
 
 # Maintenance commands do not depend on optional publishing settings.
@@ -56,13 +63,6 @@ managed_projects() {
         printf '%s\n' "$name"
     done <<< "$ids"
 }
-
-# All state belongs to one non-root host identity, including service locks and
-# credentials. Do not create root-owned installation state via sudo devctl.
-# if [[ "$UID_VALUE" == 0 && "${1:-}" != --help && "${1:-}" != -h ]]; then
-#     printf '请使用非 root 宿主机用户运行 devctl，不要 sudo devctl。\n' >&2
-#     exit 2
-# fi
 
 case "${1:-}" in
     --help|-h)
@@ -161,6 +161,7 @@ if [[ "${1:-}" == server ]]; then
     docker run --rm --init --pull never "${tty_flags[@]}" --security-opt no-new-privileges \
         --network "$DEPLOY_NETWORK" \
         --mount "type=bind,source=$DEPLOY_CREDENTIAL_DIR,target=/run/deploy-credentials,readonly" \
+        --tmpfs /run/devctl-ssh:rw,noexec,nosuid,nodev,mode=0700 \
         --env "DEV_UID=$DEV_UID" --env "DEV_GID=$DEV_GID" --env "DEV_GROUPS=$DEV_GROUPS" \
         --entrypoint /usr/local/bin/dev-entrypoint "$DEV_IMAGE" --service-shell "$@"
     exit $?
@@ -192,7 +193,10 @@ EXEC_TTY=()
 if [[ ! -t 0 || ! -t 1 ]]; then EXEC_TTY=(-T); fi
 
 compose_start() {
-    "${COMPOSE[@]}" up -d --no-recreate pi >&2
+    "${COMPOSE[@]}" up -d --no-recreate pi >&2 || return
+    if [[ "$UID_VALUE" == 0 ]]; then
+        "${COMPOSE[@]}" exec -T pi /usr/local/bin/dev-workspace-init "$DEV_UID" >&2 || return
+    fi
 }
 
 # Also preserve externally opened docker exec sessions. Leases protect wrapper

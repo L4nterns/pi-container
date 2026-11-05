@@ -8,7 +8,7 @@ ARG NPM_REGISTRY=https://registry.npmjs.org
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        bash ca-certificates curl git ripgrep fd-find util-linux openssh-client passwd; \
+        bash ca-certificates curl git ripgrep fd-find util-linux openssh-client passwd acl; \
     rm -rf /var/lib/apt/lists/*
 
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
@@ -22,11 +22,12 @@ RUN set -eu; \
 ENV HOME=/home/node
 
 COPY dev-entrypoint.sh /usr/local/bin/dev-entrypoint
+COPY lib/workspace-access.sh /usr/local/bin/dev-workspace-init
 COPY config/ssh-app-services.conf /etc/ssh/ssh_config.d/50-app-services.conf
 COPY DEPLOYMENT.md /opt/devctl/
 COPY skills/app-deployment/ /opt/devctl/skills/app-deployment/
 RUN set -eu; \
-    chmod 0755 /usr/local/bin/dev-entrypoint; \
+    chmod 0755 /usr/local/bin/dev-entrypoint /usr/local/bin/dev-workspace-init; \
     printf '%s\n' 'set completion-ignore-case on' >> /etc/inputrc; \
     printf '%s\n' \
       "PS1='\\[\\e[2;90m\\]────────────────────────────────\\[\\e[0m\\]\\n\\[\\e[1;36m\\]\\u@\\h:\\w\\$ \\[\\e[0m\\]'" \
