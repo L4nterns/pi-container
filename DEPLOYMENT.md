@@ -1,118 +1,107 @@
 # 应用部署与运维
 
-服务容器提供标准 Debian、SSH/SFTP、sudo、Supervisor 和 Nginx。开发容器使用 `ssh app-services`，宿主机从任意目录使用 `devctl server [Bash 参数...]`。通过标准工具安装所需运行时、执行程序、迁移数据库、排障或传输文件。
+这是 Pi in Docker 的可选能力：一个安装共享一个独立 Debian 服务容器，由 Supervisord 管理进程、Nginx 提供 HTTP 网关。应用不依赖 Pi 会话、开发容器或原源码目录存活。
 
-## 权限与连接
+服务端通过标准 SSH/SFTP 管理，不限应用语言。共享管理员 `deploy` 可在**服务容器内无限制免密 sudo，包括 root Shell**；应用应使用各自的非 root 用户。这里不是项目隔离或多租户平台，详见仓库的 [SECURITY.md](https://github.com/L4nterns/pi-docker/blob/main/SECURITY.md)。
 
-- `deploy` 是安装共享的管理用户，所有开发项目共同管理应用，没有项目归属限制。
-- `deploy` 可通过 `sudo -n` 获得**服务容器内完整 root 权限**。这也意味着可以执行 root Shell；禁止 root SSH 登录不是容器内提权限制。
-- 应用使用独立非 root 用户，前台运行。不要使用管理用户或 root 承载应用。
-- 开发容器仍启用 no-new-privileges 并清空能力；通过 SSH 登录的是另一容器中的独立进程，不继承客户端的降权状态。服务容器不能启用该选项，否则 sudo 失效。
-- SSH 主机密钥由宿主直接登记，严格校验。宿主私钥只读挂载，入口将必要凭据复制到容器内临时内存目录供非 root 客户端读取，不放宽宿主私钥权限；宿主 root 同样可使用。不开放宿主 SSH 端口，不挂载 Docker socket，不使用 privileged。支持终端和 SFTP，禁用密码、代理及端口转发。
+## 启用与连接
+
+编辑安装目录的 `.env`，配置项参考仓库的 [.env.example](https://github.com/L4nterns/pi-docker/blob/main/.env.example)。启用部署另需宿主 OpenSSH 客户端（`ssh-keygen`），不要将 `.env` 当 Shell 脚本执行：
+
+```dotenv
+DEPLOY_DATA_DIR=./services-data
+DEPLOY_PORT=18080
+DEPLOY_PUBLIC_URL=https://app-{app}.example.com
+```
+
+- `DEPLOY_DATA_DIR` 留空禁用部署。相对路径以安装目录为基准；安装目录内仅允许 `./services-data`，也可使用独立外部目录。缺失目录以 0700 创建，不递归改权已有数据。
+- `DEPLOY_PORT` 是服务 HTTP 网关的宿主回环端口（1024–65535），不直接绑定公网。
+- `DEPLOY_PUBLIC_URL` 是可选地址模板，不自动配置或验证 DNS、TLS 与路由。
+
+宿主命令会启动服务并登记 SSH 信任；首次单独使用 `server` 前需构建开发镜像：
+
+```bash
+devctl build
+devctl server
+devctl server -c 'sudo supervisorctl status'
+devctl server -s < script.sh
+```
+
+`server` 与 `shell` 都接受 Bash 参数，不是 SSH 选项或隐式命令字符串；均传递标准输入、输出、错误与退出码，有交互终端时分配 TTY。`server` 不挂载项目源码或 Pi 数据，不启动项目开发容器。
+
+启用部署后进入 Pi，`app-deployment` skill 会按需提供操作指导，也可使用 `/skill:app-deployment`。开发容器中可直接使用：
 
 ```bash
 ssh app-services 'id; sudo -n id'
 scp -r /workspace/reviewed-output app-services:upload
 sftp app-services
-# 宿主机无需原项目目录或开发容器：
-devctl server -c 'sudo supervisorctl status'
 ```
 
-`devctl shell` 与 `devctl server` 都透传 Bash 参数，而非本地 SSH 选项或隐式命令字符串：无参数进入 Shell，`-c '命令'` 执行命令，`-lc '命令'` 使用登录 Shell，`-s` 从 stdin 读取脚本。参数边界和空参数保留；正确引用变量与管道，避免在宿主意外展开。两者都传递标准输入/输出/错误并保留退出码，有终端时分配 TTY，管道和重定向时不分配。开发容器内直接使用的 `ssh app-services` 保持标准 SSH 语义。
+宿主管理整个服务容器使用 `devctl services {up|stop|down|ps|logs|build|recreate}`。`build` 构建镜像，`recreate` 用现有镜像重建；`stop`、`down` 和重建均保留部署目录。一个持久目录只能由一个服务实例使用。容器身份按安装路径区分；移动安装前先停容器、备份，再在新路径重建。
 
-## 持久目录与环境恢复
+## 持久化与恢复
 
-服务端持久状态位于 `/srv/app-services`：
+宿主部署目录挂载为 `/srv/app-services`：
 
-| 路径 | 用途 |
+| 路径 | 保存内容 |
 | --- | --- |
-| `ssh/`、`control/` | SSH 主机密钥、宿主登记的公钥；不要手工改权限 |
-| `setup.d/*.sh` | root 所有且不可被组/其他用户写入的环境准备脚本，按文件名顺序执行 |
-| `apps/<name>/` | 应用代码、运行环境、业务数据、日志，按职责分目录 |
-| `supervisor/*.conf` | 持久进程定义 |
-| `nginx/*.conf` | 持久网关路由定义 |
+| `ssh/`、`control/` | SSH 主机密钥和宿主登记的公钥 |
+| `setup.d/*.sh` | 幂等环境准备脚本，恢复系统包、账号及目录 |
+| `apps/<name>/` | 按职责分开的运行产物、环境、业务数据与日志 |
+| `supervisor/*.conf` | 应用进程定义 |
+| `nginx/*.conf` | HTTP 路由定义 |
 
-持久化取决于内容是否需要跨重建保留，不因为某个目录叫 HOME 就挂载。管理用户 HOME 是 `/home/deploy`，用于上传暂存和临时工作，不在持久卷内。需要保留的应用数据、运行产物、配置和密钥按用途放入上述目录；必要的管理配置/工具也应明确选择持久路径，并通过准备脚本链接或恢复。不要依赖 HOME 中的交互式改动、缓存、历史或未审查上传来恢复服务。
+**持久化按内容价值决定，不按 HOME 决定。**管理 HOME `/home/deploy` 只是暂存区，重建即丢弃。容器可写层中的系统安装与账号也不跨重建保留；必要配置、工具和依赖须有明确的持久路径或恢复步骤。
 
-安装到 `/usr`、修改 `/etc`、创建用户等写入容器可写层的操作，在**重建**后丢失；仅重启不丢失。将必要步骤记录为幂等的 `setup.d` 脚本，再执行安装。脚本必须在全新容器上也成立，恢复固定 UID/GID，不能每次随机分配，也不要递归改写已有业务数据。
+启动时按文件名顺序执行环境脚本，再校验 SSH/Nginx 并启动 Supervisor。脚本须由 root 所有、不可被组或其他用户写入，不接受符号链接；发布时用同目录临时文件原子替换。它们是受信任 root 代码，必须可审查、可重复执行，并恢复固定 UID/GID，不能递归重置已有业务数据或自动执行破坏性迁移。
 
-用 SFTP 上传到 HOME 后，通过 sudo 审查并 `install -o root -g root -m 0700` 到临时文件，再在同目录 `mv` 成 `*.sh`。编辑脚本时不要直接覆盖正在使用的文件。共享环境变更用 `sudo flock /run/app-services/change.lock ...` 协调；该锁只协调遵守约定的操作，不是权限边界。
+共享变更可用 `sudo flock /run/app-services/change.lock ...` 协调；该锁不是权限边界。准备脚本失败会阻止服务启动，先查看 `devctl services logs`，必要时由宿主管理员修复持久文件或恢复备份。同一安装的 SSH 客户端身份在 `.deploy-keys/installation/`，也需要备份。
 
-启动顺序：获得持久目录独占锁 → 初始化管理身份 → 执行环境脚本 → 校验 SSH/Nginx → 启动 Supervisor。准备脚本失败会阻止启动并写出诊断，不会假称应用就绪。Supervisor/Nginx 定义必须先通过环境脚本恢复其依赖的用户和目录。
+## 发布应用
 
-环境脚本执行任意受信任 root 代码，不是安全沙箱。网络安装可能因仓库故障失败；按应用需要固定依赖版本、校验下载来源，并保留可恢复的依赖产物。不要把每次启动都不该执行的数据库迁移或破坏性操作放入自动恢复脚本。
+1. **检查现状**：确认应用名、账号 UID/GID、端口、运行时与磁盘空间，不覆盖已有应用。不同语言的产物须兼容容器架构、ABI 和系统库，共享依赖冲突需要协调；GPU、设备和特权负载不由 SSH 自动授予。
+2. **审查产物**：只上传运行所需文件，不整库上传凭据、开发缓存或备份。先暂存 HOME，再用 sudo 安装到持久目录；不要以 root 执行不受信任的应用安装脚本。
+3. **准备环境**：将必要系统安装、固定账号与目录创建写入 `setup.d`，验证在全新容器上可恢复。代码与启动配置由管理员控制，仅数据、缓存等目录交给应用用户写入。
+4. **启动进程**：写入 Supervisor 定义，执行 `sudo supervisorctl reread`、`sudo supervisorctl update <name>`。应用保持前台，通过 `setpriv` 切换用户、清空附加组和能力、启用 no-new-privileges；不要依赖 SSH 会话。
+5. **发布路由**：先验证内部服务，再安装明确域名的 Nginx 路由，校验后重载，最后验收真实公网。变更前保留上一份配置和产物，失败时恢复后再重载。
 
-## 按需准备应用
+可参考 [Python 示例](skills/app-deployment/examples/python/) 中的 `setup.sh`、`supervisor.conf`、`nginx.conf` 和 `server.py`；开发镜像中位于 `/opt/devctl/skills/app-deployment/examples/python/`。先调整示例应用名 `demo`、UID/GID 20000、端口 20000 和域名；它演示完整配置，不限制应用语言。
 
-运行时可以是 Python、Node、Java、PHP、Ruby、自包含程序或其他 Debian 可运行程序。服务镜像中的 Python 是 Supervisor/登记工具的管理依赖，不是应用语言限制。不要求应用使用同一基础镜像构建，但其产物必须兼容服务容器的架构、ABI 与系统库。需要 GPU、设备、宿主内核能力或特权的程序，须由管理员另行配置宿主环境。
-
-1. 检查已有应用、端口、用户、运行环境和磁盘空间；不要覆盖同名应用或安装互相冲突的系统依赖。
-2. 只传输审查过的运行产物，不上传整个仓库、私钥、令牌、开发缓存、备份或服务数据。SFTP 不会替你扫描秘密或限制包大小。
-3. 建立应用独立用户和固定 UID、数据目录。应用代码和启动配置尽量由 root 管理；仅数据/缓存等必要目录授予运行用户写权限。
-4. 准备依赖和启动定义；以应用用户执行包安装脚本，不能让不受信任的应用脚本在 sudo 中运行。
-5. 先检查内部服务，再发布网关路由，最后验证真实公网与业务。
-
-### 可运行示例
-
-开发镜像提供 `/opt/devctl/skills/app-deployment/examples/python/`，含环境准备脚本、Python 服务、Supervisor 和 Nginx 示例。它演示虚拟环境及非 root 前台进程，不是语言限制。**先审查并按实际情况改应用名、固定 UID、端口和依赖**；示例使用 `demo`、UID/GID 20000、端口 20000，避免与已有应用冲突。Nginx `server_name` 使用明确的已配置域名（示例为 `app-demo.example.com`），需要联调别名时逐一添加，不使用匹配任意后缀的域名正则。
+服务端校验与重载路由：
 
 ```bash
-scp -r /opt/devctl/skills/app-deployment/examples/python app-services:upload
-ssh app-services 'sudo -n bash -s' <<'REMOTE'
-set -euo pipefail
-base=/srv/app-services
-stage=/home/deploy/upload
-install -o root -g root -m 0700 "$stage/setup.sh" "$base/setup.d/.demo.tmp"
-mv "$base/setup.d/.demo.tmp" "$base/setup.d/10-demo.sh"
-bash -eu "$base/setup.d/10-demo.sh"
-install -o root -g root -m 0644 "$stage/server.py" "$base/apps/demo/code/server.py"
-install -o root -g root -m 0600 "$stage/supervisor.conf" "$base/supervisor/demo.conf"
-supervisorctl reread
-supervisorctl update demo
-REMOTE
+sudo nginx -t -c /opt/app-services/nginx.conf &&
+    sudo nginx -s reload -c /opt/app-services/nginx.conf
 ```
 
-然后用 `ssh app-services 'curl --fail --max-time 5 http://127.0.0.1:20000/'` 检查应用（必要时有界重试，不能把进程存在当作健康）。成功后安装路由：
+## 运行与停止
+
+从宿主查看状态、日志或重启应用：
 
 ```bash
-ssh app-services 'sudo -n bash -s' <<'REMOTE'
-set -euo pipefail
-base=/srv/app-services
-install -o root -g root -m 0600 "/home/deploy/upload/nginx.conf" "$base/nginx/demo.conf"
-nginx -t -c /opt/app-services/nginx.conf
-nginx -s reload -c /opt/app-services/nginx.conf
-REMOTE
-curl --fail --max-time 5 -H 'Host: app-demo.example.com' http://app-services:8080/
+devctl server -c 'sudo supervisorctl status'
+devctl server -c 'sudo tail -n 100 /srv/app-services/apps/demo/logs/stderr.log'
+devctl server -c 'sudo supervisorctl restart demo'
 ```
 
-生产变更应保留上一份配置和产物；验证失败恢复原配置再重载。以上是最小示例，不提供自动事务、数据库回滚或无停机保证。
+Supervisor 定义应设置进程组停止、有限等待时间和日志轮转，参考示例。服务容器的停止宽限期为 30 秒，应用停止预算必须与之匹配。反复启动失败可能进入 FATAL，应检查日志和依赖；RUNNING 不等于健康。监控磁盘与资源，Supervisor 不提供每应用资源配额。
 
-## 日常管理
+`supervisorctl stop` **不持久保存停止状态**。要在重建后仍停止，保存 `autostart=false`，再 `reread`、`update <name>`；同时将路由移出 `nginx/*.conf` 并校验重载。重新启用时反向操作，先确认内部健康再恢复路由。
 
-```bash
-ssh app-services 'sudo supervisorctl status'
-ssh app-services 'sudo supervisorctl restart demo'
-ssh app-services 'sudo tail -n 100 /srv/app-services/apps/demo/logs/stderr.log'
-```
+更新需自行协调进程切换、单写数据库和迁移，不保证无停机或自动回滚。
 
-Supervisor 定义使用独立进程组、`stopasgroup=true`、`killasgroup=true`、有限停止时间和日志轮转。示例通过 `setpriv` 在执行应用前切换 UID/GID、清空组和能力并设置 no-new-privileges。应用保持前台，不能自行 daemonize、脱离进程组或依赖 SSH 会话。服务容器的停止宽限期为 30 秒，必须覆盖应用与核心服务的停止预算；需要更长时间的程序应由管理员调整容器配置并验证实际停机，不能把强制终止当作正常关闭。
+## 公网入口与验收
 
-**`supervisorctl stop` 只影响当前 Supervisor 进程的运行状态。**需要重建后仍停止时，将该程序的持久配置改成 `autostart=false`，再执行 `supervisorctl reread` 和 `supervisorctl update <name>`。同时将其路由移出 `nginx/*.conf` 并校验重载，否则网关可能返回 502。重新启用时改回 `autostart=true`、更新监督器、确认内部健康后恢复路由。
+HTTP 应用通常只监听服务容器回环地址，由内部 Nginx 路由转发。开发容器可用 `curl -H 'Host: app-demo.example.com' http://app-services:8080/` 联调；后台任务无需 HTTP 路由，其他协议需要单独规划入口。
 
-新版本可使用独立发布目录和新端口，健康后切换路由，再停止旧进程；也可在明确接受中断时停止后替换。程序状态、健康和业务正确性是三件事，不能混为一谈。单写数据库、迁移及任务消费的并发副作用由应用协调。
+宿主管理员参考仓库的 [config/nginx-apps.conf](https://github.com/L4nterns/pi-docker/blob/main/config/nginx-apps.conf)，配置 DNS、证书和 Nginx，替换 `example.com` 并复用可信代理及连接升级配置。工具不修改宿主站点。`*.example.com` 可覆盖 `app-demo.example.com`，`app-*` 不是 DNS 泛域名。入口配置完成后，新增 HTTP 应用只需增加服务端路由，不逐项增加宿主端口。
 
-## 网关、联调与公网
+先验内部服务，再验证真实 HTTPS 的证书、目标页面、资源、API 和所需的 WebSocket/SSE。未知应用应返回 404；登录页、重定向或 Cloudflare 质询不算业务通过，不关闭 TLS 校验来凑成功。应用只有在可信入口清洗转发头后才能据此作信任判断。
 
-HTTP 应用建议只监听服务容器回环地址，使用不冲突的内部端口，通过 Nginx `Host` 路由暴露。非 HTTP 后台任务无需路由；其他协议按实际需要配置内部监听或明确的宿主入口，不能宣称 HTTP 网关支持所有协议。
+## 备份、删除与卸载
 
-开发容器联调示例：`curl -H 'Host: app-api.example.com' http://app-services:8080/`。新增 HTTP 应用只改服务容器内的路由文件，不逐项修改宿主 Nginx 或占用新宿主端口。共享路由模板支持 WebSocket 和 SSE，未知应用返回 404；删除或停用应用须撤下路由。
+备份部署目录及安装 SSH 身份，保留数字 UID/GID、权限和主机密钥。停服务或使用应用一致性备份，数据库需单独保证一致性，备份应加密。
 
-由宿主管理员配置 DNS、TLS 及固定回环上游。宿主参考配置接受 `app-` 加最多 59 字符的小写字母、数字或中划线应用标识（首尾为字母或数字），构成不超过 63 字符的 DNS 标签；这只是该参考入口的命名约定，不是服务容器的应用管理协议。可选 `DEPLOY_PUBLIC_URL=https://app-{app}.example.com` 仅为地址模板，非自动公网验证。部署后用 curl 校验证书、HTTP 状态、页面、资源、API 和长连接。重定向、登录页或 Cloudflare 质询不算业务通过；不要为了测试而关闭 TLS 校验。外部请求转发头只有在宿主可信代理已清洗时才可用于业务信任判断。
+**永久删除应用前须获得明确授权并做好必要备份。**先持久禁用并停止进程、撤路由，再核对并删除该应用的 Supervisor 定义、产物、数据、日志、准备脚本及账号。不要清理共享运行时、SSH 身份或其他应用；操作中断后核查实际状态，删除不是原子事务。SSH 权限本身不强制授权或备份流程。
 
-## 删除与备份
-
-SSH 管理权限允许直接修改和删除文件；skill 是操作指导，不是权限隔离。**永久删除必须先获得用户明确授权并备份**，授权与备份要求属于操作流程，不由 SSH 命令强制执行。
-
-先持久禁用应用、停止进程并撤下路由，确认无相关进程后，移除对应 Supervisor 配置并更新监督器。逐一核对应用代码/数据/日志路径、环境脚本、运行账号和组，再删除；不要使用模糊通配符、递归追随符号链接或清理共享运行时。中断后先检查实际状态再继续，不宣称具有自动事务恢复。保留安装 SSH 身份及其他应用。
-
-源码、本地构建输出、外部数据库、CDN、快照和备份不属于服务端副本；分别处理。卸载工具、删除容器和删除应用不是同一操作。备份整个持久目录，保留数字 UID/GID、权限和主机密钥；数据库必须一致性备份，备份应加密。
+源码、外部数据库、CDN、备份和快照需分别处理；文件删除不等于安全擦除。卸载前退出会话，执行 `devctl down --all` 与 `devctl services down`，备份后核对删除本安装的软链接、安装目录及外部数据，不使用全局 Docker prune。
