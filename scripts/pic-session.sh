@@ -27,7 +27,20 @@ case "${1:-}" in
         # Process hosting only: no --resume/--continue or conversation selection.
         args=()
         if [[ -r /run/pic-ssh/known_hosts ]]; then args+=(--skill /opt/pic/skills/app-deployment); fi
-        "${TMUX_CMD[@]}" new-session -d -s "$name" -c /workspace -- pi "${args[@]}" ;;
+        ready_dir=$(mktemp -d /tmp/pic-start.XXXXXXXX)
+        trap 'rm -rf -- "$ready_dir"' EXIT
+        "${TMUX_CMD[@]}" new-session -d -s "$name" -c /workspace -- bash /opt/pic/scripts/run-pi.sh --prepared "$ready_dir/status" "${args[@]}"
+        for ((attempt=0; attempt<100; attempt++)); do
+            [[ ! -s "$ready_dir/status" ]] || break
+            "${TMUX_CMD[@]}" has-session -t "=$name" 2>/dev/null || break
+            sleep .05
+        done
+        if [[ ! -s "$ready_dir/status" ]] || [[ $(<"$ready_dir/status") != ready ]]; then
+            "${TMUX_CMD[@]}" kill-session -t "=$name" 2>/dev/null || true
+            echo 'Pi 启动准备失败，未接回或创建替代进程；请检查插件初始化状态。' >&2
+            exit 1
+        fi
+        rm -rf -- "$ready_dir"; trap - EXIT ;;
     attach)
         valid_name "$name" || exit 2
         if ! "${TMUX_CMD[@]}" has-session -t "=$name" 2>/dev/null; then echo '该 Pi 已不在运行，不能接回。可启动并托管 Pi，再在 Pi 内使用 /resume 选择历史。' >&2; exit 1; fi ;;

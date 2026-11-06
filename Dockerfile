@@ -22,7 +22,7 @@ RUN set -eu; \
 ENV HOME=/home/node
 
 COPY config/pi-bootstrap.json /opt/pic/config/pi-bootstrap.json
-COPY scripts/bootstrap-pi.mjs /opt/pic/scripts/bootstrap-pi.mjs
+COPY scripts/bootstrap-pi.mjs scripts/run-pi.sh /opt/pic/scripts/
 COPY config/tmux.conf /opt/pic/config/tmux.conf
 COPY scripts/pic-session.sh /usr/local/bin/pic-session
 COPY pic-entrypoint.sh /usr/local/bin/pic-entrypoint

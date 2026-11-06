@@ -119,9 +119,11 @@ docker exec -e PIC_UID=1000 -e PIC_GID=1000 -e PIC_GROUPS=1000 "$DEV" pic-entryp
     ssh app-services "test \"\$(id -u)\" = 19000; sudo -n true"
 '
 # Live process lifetime is independent from the docker exec that created it.
+# Install with the real Pi before replacing only the model process in this fixture.
+docker exec "$DEV" pic-entrypoint --version
 # Only this disposable container's Pi symlink is temporarily replaced.
 docker exec "$DEV" sh -ec 'mv /usr/local/bin/pi /usr/local/bin/pi.original; printf "#!/bin/sh\necho \$\$ > /tmp/live-pi-pid\nexec sleep infinity\n" > /usr/local/bin/pi; chmod 755 /usr/local/bin/pi'
-docker exec "$DEV" pic-entrypoint --pic-session start smoke-live
+docker exec -e PI_OFFLINE=1 "$DEV" pic-entrypoint --pic-session start smoke-live
 count=$(docker exec --user 12345:12345 "$DEV" pic-session count)
 [[ "$count" == 1 ]] || { echo 'Detached Pi did not survive exec exit' >&2; exit 1; }
 first_pid=$(docker exec "$DEV" sh -ec 'for i in 1 2 3 4 5; do test ! -s /tmp/live-pi-pid || { cat /tmp/live-pi-pid; exit 0; }; sleep .1; done; exit 1')

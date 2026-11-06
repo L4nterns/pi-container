@@ -33,7 +33,7 @@ test(
     const log = join(root, "pids");
     const workspace = join(root, "project");
     await mkdir(workspace);
-    const shim = `#!/usr/bin/env bash\nargs=("$@"); if [[ \${PIC_TEST_FAIL_STATE:-} == 1 && \${args[4]:-} == list-sessions ]]; then echo state-unreadable >&2; exit 1; fi; for i in "\${!args[@]}"; do if [[ "\${args[i]}" == /opt/pic/config/tmux.conf ]]; then args[i]=${JSON.stringify(resolve("config/tmux.conf"))}; fi; if [[ "\${args[i]}" == /workspace ]]; then args[i]=${JSON.stringify(workspace)}; fi; done; exec ${JSON.stringify(tmux)} "\${args[@]}"\n`;
+    const shim = `#!/usr/bin/env bash\nargs=("$@"); if [[ \${PIC_TEST_FAIL_STATE:-} == 1 && \${args[4]:-} == list-sessions ]]; then echo state-unreadable >&2; exit 1; fi; for i in "\${!args[@]}"; do if [[ "\${args[i]}" == /opt/pic/config/tmux.conf ]]; then args[i]=${JSON.stringify(resolve("config/tmux.conf"))}; fi; if [[ "\${args[i]}" == /workspace ]]; then args[i]=${JSON.stringify(workspace)}; fi; if [[ "\${args[i]}" == /opt/pic/scripts/run-pi.sh ]]; then args[i]=${JSON.stringify(resolve("scripts/run-pi.sh"))}; fi; done; exec ${JSON.stringify(tmux)} "\${args[@]}"\n`;
     await writeFile(join(bin, "tmux"), shim, { mode: 0o755 });
     await writeFile(
       join(bin, "pi"),
@@ -60,12 +60,18 @@ test(
       PIC_TEST_PID_LOG: log,
       PIC_TEST_ARGS_LOG: join(root, "argv"),
       PIC_TEST_PROGRESS: join(root, "progress"),
+      PI_CODING_AGENT_DIR: join(root, "agent"),
+      PIC_PI_BOOTSTRAP_MANIFEST: join(root, "bootstrap.json"),
       TERM: "xterm-256color",
     };
     delete env.TMUX;
+    await writeFile(env.PIC_PI_BOOTSTRAP_MANIFEST, '{"packages":[]}');
     const helper = resolve("scripts/pic-session.sh");
+    const hostedLauncher = join(root, 'hosted-launcher.sh');
+    await writeFile(hostedLauncher, (await readFile(resolve('scripts/run-pi.sh'), 'utf8')).replace('exec /usr/local/bin/pic-session "$@"', `exec bash ${JSON.stringify(helper)} "$@"`));
+    await writeFile(join(root, 'bootstrap-pi.mjs'), await readFile(resolve('scripts/bootstrap-pi.mjs')));
     const run = (args, extra = {}) =>
-      spawnSync("/bin/bash", [helper, ...args], {
+      spawnSync("/bin/bash", args[0] === 'start' ? [hostedLauncher, '--hosted', ...args] : [helper, ...args], {
         env: { ...env, ...extra },
         encoding: "utf8",
         timeout: 5000,
@@ -114,6 +120,7 @@ test(
     await wait(() => first.exited);
     assert.match(run(["list"]).stdout, /main\t0\t/);
     assert.equal(run(["count"]).stdout.trim(), "1");
+    assert.equal(spawnSync('flock', ['-n', '-x', join(env.PI_CODING_AGENT_DIR, '.pic-packages.lock'), 'true']).status, 1, 'detached tmux Pi must retain the shared package lease');
     const detachedProgress = await progress();
     await wait(async () => await progress() > detachedProgress + 2);
     assert.equal(await readFile(log, "utf8"), original, "output must progress without a replacement process");
@@ -137,6 +144,7 @@ test(
     assert.equal(run(["close", "main"]).status, 0);
     await wait(() => third.exited);
     assert.equal(run(["count"]).stdout.trim(), "0");
+    await wait(() => spawnSync('flock', ['-n', '-x', join(env.PI_CODING_AGENT_DIR, '.pic-packages.lock'), 'true']).status === 0);
     assert.equal(
       run(["attach", "main"]).status,
       1,
@@ -152,5 +160,10 @@ test(
     );
     assert.equal(await readFile(env.PIC_TEST_ARGS_LOG, "utf8"), "");
     assert.equal(run(["close", "another-process"]).status, 0);
+    await writeFile(env.PIC_PI_BOOTSTRAP_MANIFEST, JSON.stringify({packages:[{source:'git:github.com/example/not-ready'}]}));
+    const blocked = spawnSync('/bin/bash', [helper, 'start', 'blocked'], {env, encoding:'utf8', timeout:5000});
+    assert.equal(blocked.status, 1, 'tmux creation must report an unready plugin, not a successful Pi');
+    assert.equal(run(['count']).stdout.trim(), '0');
+    assert.equal((await readFile(log, 'utf8')).trim().split('\n').length, 2);
   },
 );
