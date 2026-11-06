@@ -59,7 +59,10 @@ test('long lists page, Home/End select edges and small terminals keep all rows w
   f.proc.write('\x1b[F'); await f.wait(s => s.includes('\x1b[7mItem-39'));
   const output = await f.finish('\r');
   assert.match(output, /39\r?\n\x1b\[0m\x1b\[\?2004l/);
-  for (const frame of output.split('\x1b[H\x1b[2J').slice(1)) assert(frame.split('\x1b[?2004l')[0].split('\n').length <= 9, frame);
+  const frames = output.split('\x1b[?2026h').slice(1).map(s => s.split('\x1b[?2026l')[0]);
+  assert(frames.length >= 3, output);
+  for (const frame of frames) assert(!frame.includes('\x1b[2J'), 'navigation never erases the whole screen');
+  assert(!frames.at(-1).includes('中文菜单'), 'unchanged heading is not repainted');
 });
 
 test('Escape and Ctrl-D cancel with exact TTY restoration', async t => {
@@ -96,11 +99,11 @@ test('menu labels cannot inject terminal escapes, and CJK labels are clipped wit
   const f = await fixture(t, { rows: 10, cols: 36, title: '项目\x1b[31m\n标题', items: ['中文名称'.repeat(50) + '🟢', '返回'] });
   const output = await f.finish('\r');
   assert(!output.includes('\x1b[31m')); assert(!output.includes('\ufffd'));
-  const frame = output.split('\x1b[H\x1b[2J')[1].split('\x1b[?2004l')[0];
+  const frame = output.split('\x1b[?2026h')[1].split('\x1b[?2026l')[0];
   assert(frame.includes('…'));
-  for (const line of frame.split('\n')) {
+  for (const line of frame.split(/\x1b\[\d+;1H/).filter(Boolean)) {
     const plain = line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
-    const conservativeWidth = [...plain].reduce((n, c) => n + (c.charCodeAt(0) > 127 ? 2 : 1), 0);
+    const conservativeWidth = [...plain].reduce((n, c) => n + (c.charCodeAt(0) > 127 && c !== '─' ? 2 : 1), 0);
     assert(conservativeWidth < 36, line);
   }
 });

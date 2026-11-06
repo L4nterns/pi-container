@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Bash-only host UI. A caller may keep one alternate screen for its whole tree;
-# standalone selectors still restore the exact terminal mode and primary screen.
+# Bash-only UI: compose a frame, diff its lines, then emit one synchronized write.
+# No full-screen erase during navigation, no second renderer or host dependency.
 menu_screen_open() {
     MENU_SCREEN=1
-    printf '\033[?1049h\033[H\033[2J' >&2
+    printf '\033[?1049h\033[H' >&2
 }
 menu_screen_close() {
+    [[ ${MENU_SCREEN:-0} == 1 ]] || return 0
     printf '\033[0m\033[?2004l\033[?25h\033[?1049l' >&2
     MENU_SCREEN=0
 }
@@ -14,8 +15,6 @@ menu_dimensions() {
     [[ "$rows" =~ ^[0-9]+$ && "$cols" =~ ^[0-9]+$ ]] || return 1
     (( rows >= 5 && cols >= 12 )) || { error='「终端太小」请放大后重试。'; return 1; }
 }
-# Conservative CJK/emoji columns, never bytes. All screens use the same label
-# column. Raw log escape sequences are display data, not terminal instructions.
 menu_clip() {
     local text=$1 limit=$2 c step n width=0 out='' ansi=$'\e''\[[0-?]*[ -/]*[@-~]'
     while [[ "$text" =~ $ansi ]]; do text=${text//"${BASH_REMATCH[0]}"/}; done
@@ -24,37 +23,51 @@ menu_clip() {
         c=${text:n:1}; step=2
         [[ "$c" != [\ -~] ]] || step=1
         if (( width + step > limit )); then break; fi
-        # Reserve room for the ellipsis only when more characters remain.
         if (( n + 1 < ${#text} && width + step > limit - 2 )); then break; fi
         out+=$c; width=$((width + step))
     done
     if (( n < ${#text} && limit >= 2 )); then out+='…'; width=$((width + 2)); fi
     MENU_TEXT=$out MENU_WIDTH=$width
 }
-menu_line() {
-    menu_clip "$1" "$((cols - 3))"
-    printf '%s' "$MENU_TEXT" >&2
-}
 menu_row() {
-    local label=$1 detail='' pad label_width=16
+    local label=$1 detail='' pad label_width=16 primary
     if [[ "$label" == *$'\t'* ]]; then
         detail=${label#*$'\t'}; label=${label%%$'\t'*}
         (( cols >= 32 )) || label_width=$((cols / 2 - 3))
-        menu_clip "$label" "$label_width"
-        pad=$((label_width - MENU_WIDTH + 2))
-        printf '%s%*s' "$MENU_TEXT" "$pad" '' >&2
-        menu_clip "$detail" "$((cols - label_width - 7))"
-        printf '%s' "$MENU_TEXT" >&2
-    else menu_line "$label"; fi
+        menu_clip "$label" "$label_width"; primary=$MENU_TEXT
+        printf -v pad '%*s' "$((label_width - MENU_WIDTH + 2))" ''
+        menu_clip "$detail" "$((cols - label_width - 5))"
+        MENU_TEXT="$primary$pad$MENU_TEXT"
+    else menu_clip "$label" "$((cols - 3))"; fi
+}
+menu_frame() {
+    local i separator
+    frame=()
+    for ((i=0; i<rows; i++)); do frame+=(''); done
+    menu_clip "$1" "$((cols - 1))"; frame[0]=$'\e[1m'"$MENU_TEXT"$'\e[0m'
+    printf -v separator '%*s' "$((cols - 1))" ''; separator=${separator// /─}
+    frame[1]=$'\e[2m'"$separator"$'\e[0m'
+    menu_clip "${2:-}" "$((cols - 1))"; frame[rows-2]=$'\e[2m'"$MENU_TEXT"$'\e[0m'
+    menu_clip "${3:-}" "$((cols - 1))"; frame[rows-1]=$MENU_TEXT
+}
+menu_paint() {
+    local i chunk='' position
+    for ((i=0; i<rows; i++)); do
+        if [[ ${previous_frame[i]+set} && ${previous_frame[i]} == "${frame[i]}" && ${previous_cols:-0} == "$cols" ]]; then continue; fi
+        printf -v position '\033[%s;1H' "$((i + 1))"
+        chunk+="$position"$'\e[0m'"${frame[i]}"$'\e[K'
+    done
+    if [[ -n "$chunk" ]]; then printf '\033[?2026h%s\033[?2026l' "$chunk" >&2; fi
+    previous_frame=("${frame[@]}"); previous_cols=$cols
 }
 menu_heading() {
-    local rows cols error='' MENU_TEXT MENU_WIDTH
+    local rows cols error='' MENU_TEXT MENU_WIDTH previous_cols
+    local -a frame=() previous_frame=()
     menu_dimensions || { printf '%s\n' "$error" >&2; return 1; }
-    printf '\033[H\033[2J' >&2
-    menu_line "$1"; printf '\r\n' >&2
-    menu_line "${2:-}"; printf '\r\n\r\n' >&2
+    menu_frame "$1" "${2:-}" '请等待操作完成'
+    menu_paint
 }
-# Called in a subshell so traps never replace the caller's lifecycle traps.
+# Subshell traps do not replace the caller's lifecycle traps.
 menu_tty_begin() {
     [[ -t 0 && -t 2 && ${TERM:-dumb} != dumb ]] || { printf '「菜单」需要 ANSI 交互终端。\n' >&2; return 1; }
     saved=$(stty -g) || return
@@ -66,8 +79,7 @@ menu_tty_begin() {
     [[ ${MENU_SCREEN:-0} == 1 ]] || printf '\033[?1049h' >&2
     printf '\033[?25l\033[?2004h' >&2
 }
-# Blocking first byte; timeouts apply only to an escape continuation. Bracketed
-# paste is tracked across reads and can never confirm or cancel an operation.
+# Only escape continuations use a timeout; pasted keys cannot execute actions.
 menu_key() {
     local char sequence
     MENU_KEY=''
@@ -112,25 +124,28 @@ menu_key() {
     return 0
 }
 menu_select() (
-    local title=$1 saved rows cols visible first i index=${MENU_INDEX:-0} paste=0 error='' MENU_KEY MENU_CHAR MENU_TEXT MENU_WIDTH
+    local title=$1 saved rows cols visible first i index=${MENU_INDEX:-0} paste=0 error='' MENU_KEY MENU_CHAR MENU_TEXT MENU_WIDTH previous_cols
     local LC_ALL=C.UTF-8
     shift
-    local -a items=("$@")
+    local -a items=("$@") frame=() previous_frame=()
     (( ${#items[@]} )) || return 1
     [[ "$index" =~ ^[0-9]+$ ]] && (( index < ${#items[@]} )) || index=0
     menu_tty_begin || return
     menu_draw() {
         menu_dimensions || return
         visible=$((rows - 4)); (( visible <= ${#items[@]} )) || visible=${#items[@]}
-        first=$((index / visible * visible))
-        printf '\033[H\033[2J' >&2
-        menu_line "$title"; printf '\r\n' >&2
-        menu_line "${MENU_NOTICE:-}"; printf '\r\n' >&2
-        for ((i=first; i<first+visible && i<${#items[@]}; i++)); do
-            if (( i == index )); then printf '> \033[7m' >&2; else printf '  ' >&2; fi
-            menu_row "${items[i]}"; printf '\033[0m\r\n' >&2
+        # Like Pi's selector, keep the selection near the centre of the viewport.
+        first=$((index - visible / 2)); (( first >= 0 )) || first=0
+        (( first + visible <= ${#items[@]} )) || first=$((${#items[@]} - visible))
+        menu_frame "$title" "${MENU_NOTICE:-}" "「Esc」${MENU_ESCAPE_LABEL:-返回} · 「↑/↓」选择 · 「Enter」确认"
+        if (( ${#items[@]} > visible )); then
+            menu_clip "$((index + 1)) / ${#items[@]}  ${MENU_NOTICE:-}" "$((cols - 1))"; frame[rows-2]=$MENU_TEXT
+        fi
+        for ((i=first; i<first+visible; i++)); do
+            menu_row "${items[i]}"
+            if (( i == index )); then frame[i-first+2]=$'> \e[7m'"$MENU_TEXT"$'\e[0m'; else frame[i-first+2]="  $MENU_TEXT"; fi
         done
-        menu_line '「↑/↓」选择 · 「Enter」确认 · 「Esc」返回'
+        menu_paint
     }
     trap 'menu_draw || exit 1' WINCH
     menu_draw || return
@@ -149,32 +164,28 @@ menu_select() (
     done
     return 1
 )
-# Read-only output page, not an editor or an extra confirmation. Esc returns one
-# level; Enter deliberately does nothing. Long lines scroll horizontally.
 menu_view() (
-    local title=$1 file=$2 saved rows cols visible first=0 left=0 longest=0 i last size truncated='' paste=0 error='' MENU_KEY MENU_CHAR MENU_TEXT MENU_WIDTH
+    local title=$1 file=$2 saved rows cols visible first=0 left=0 longest=0 i last size truncated='' paste=0 error='' MENU_KEY MENU_CHAR MENU_TEXT MENU_WIDTH previous_cols
     local LC_ALL=C.UTF-8
-    local -a lines=()
+    local -a lines=() frame=() previous_frame=()
     mapfile -t lines < <(tail -n 5000 -- "$file")
-    (( ${#lines[@]} )) || lines=('「暂无输出」')
+    (( ${#lines[@]} )) || lines=('暂无输出')
     size=$(stat -c %s -- "$file") || return
-    if (( ${#lines[@]} >= 5000 || size >= 1048576 )); then truncated=' ·「输出较多」仅显示末尾内容'; fi
+    if (( ${#lines[@]} >= 5000 || size >= 1048576 )); then truncated=' · 仅显示末尾内容'; fi
     for i in "${lines[@]}"; do (( ${#i} <= longest )) || longest=${#i}; done
     menu_tty_begin || return
     menu_draw() {
         menu_dimensions || return
         visible=$((rows - 4)); last=$((${#lines[@]} - visible)); (( last >= 0 )) || last=0
         (( first <= last )) || first=$last
-        printf '\033[H\033[2J' >&2
-        menu_line "$title"; printf '\r\n' >&2
-        menu_line "「输出」$((first + 1))–$((first + visible < ${#lines[@]} ? first + visible : ${#lines[@]})) / ${#lines[@]} 行$truncated"; printf '\r\n' >&2
-        for ((i=first; i<first+visible && i<${#lines[@]}; i++)); do menu_line "${lines[i]:left}"; printf '\r\n' >&2; done
-        printf '\033[%s;1H' "$((rows - 1))" >&2
-        menu_line '「↑/↓」滚动 · 「PgUp/PgDn」翻页 · 「Esc」返回'
+        menu_frame "$title" "${MENU_RESULT:-}$((first + 1))–$((first + visible < ${#lines[@]} ? first + visible : ${#lines[@]})) / ${#lines[@]} 行$truncated" '「Esc」返回 · 「↑/↓」滚动 · 「PgUp/PgDn」翻页'
+        for ((i=first; i<first+visible && i<${#lines[@]}; i++)); do menu_clip "${lines[i]:left}" "$((cols - 1))"; frame[i-first+2]=$MENU_TEXT; done
+        menu_paint
     }
     trap 'menu_draw || exit 1' WINCH
+    menu_dimensions || return
+    if [[ ${MENU_VIEW_END:-0} == 1 ]]; then first=$((${#lines[@]} - rows + 4)); (( first >= 0 )) || first=0; fi
     menu_draw || return
-    if [[ ${MENU_VIEW_END:-0} == 1 ]]; then first=$last; menu_draw || return; fi
     while menu_key; do
         case "$MENU_KEY" in
             up) (( first <= 0 )) || first=$((first - 1)) ;;
@@ -190,18 +201,16 @@ menu_view() (
         menu_draw || return
     done
 )
-# Small optional build-argument input; no shell evaluation, command history or
-# host runtime. Enter accepts a line, empty Enter starts, Esc cancels the build.
 menu_input() (
-    local title=$1 note=$2 value='' saved rows cols paste=0 error='' MENU_KEY MENU_CHAR MENU_TEXT MENU_WIDTH
+    local title=$1 note=$2 value='' saved rows cols paste=0 error='' MENU_KEY MENU_CHAR MENU_TEXT MENU_WIDTH previous_cols
     local LC_ALL=C.UTF-8
+    local -a frame=() previous_frame=()
     menu_tty_begin || return
     menu_draw() {
         menu_dimensions || return
-        menu_heading "$title" "$note" || return
-        menu_line "> $value"; printf '\r\n' >&2
-        printf '\033[%s;1H' "$((rows - 1))" >&2
-        menu_line '「Enter」下一项／空行开始 · 「Esc」取消'
+        menu_frame "$title" "$note" '「Esc」取消 · 「Enter」下一项／空行开始'
+        menu_clip "> $value" "$((cols - 1))"; frame[2]=$MENU_TEXT
+        menu_paint
     }
     trap 'menu_draw || exit 1' WINCH
     menu_draw || return

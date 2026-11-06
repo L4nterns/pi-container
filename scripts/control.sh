@@ -37,15 +37,27 @@ compose_stop_if_idle() {
     if [[ "$exec_count" == 0 ]] && require_no_live_pi >/dev/null 2>&1; then "${CURRENT[@]}" stop pi >&2 || true; fi
 }
 finish_session() { local status=$?; trap - EXIT; session_finish compose_stop_if_idle; exit "$status"; }
-managed_projects() {
-    local ids id name
-    ids=$(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$REPO" --filter 'label=com.docker.compose.service=pi') || return
-    while IFS= read -r id; do
-        [[ -n "$id" ]] || continue
-        name=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$id") || return
-        [[ "$name" =~ ^pic-r${REPO_HASH}-u${UID_VALUE}-[0-9a-f]{16}$ ]] || continue
-        printf '%s\n' "$name"
-    done <<< "$ids"
+container_status() {
+    local cid=$1 state code health
+    if [[ -z "$cid" ]]; then printf '未创建'; return; fi
+    IFS=$'\t' read -r state code health < <(docker inspect --format '{{.State.Status}}{{printf "\t"}}{{.State.ExitCode}}{{printf "\t"}}{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}' "$cid")
+    case "$state" in
+        running) printf '运行中'; [[ "$health" == - ]] || printf '（%s）' "$health" ;;
+        exited) printf '已停止（退出码 %s）' "$code" ;;
+        created) printf '已创建，未启动' ;;
+        paused) printf '已暂停' ;;
+        restarting) printf '重启中（退出码 %s）' "$code" ;;
+        dead) printf '异常终止（退出码 %s）' "$code" ;;
+        *) printf '%s' "${state:-状态未确认}" ;;
+    esac
+}
+status_table() {
+    local label=$1 value=$2 state=$3 c n label_width=0 value_width=0
+    local LC_ALL=C.UTF-8
+    for ((n=0; n<${#label}; n++)); do c=${label:n:1}; if [[ "$c" == [\ -~] ]]; then label_width=$((label_width + 1)); else label_width=$((label_width + 2)); fi; done
+    for ((n=0; n<${#value}; n++)); do c=${value:n:1}; if [[ "$c" == [\ -~] ]]; then value_width=$((value_width + 1)); else value_width=$((value_width + 2)); fi; done
+    local width=$value_width; (( width >= label_width )) || width=$label_width
+    printf '%s%*s状态\n%s%*s%s\n' "$label" "$((width - label_width + 2))" '' "$value" "$((width - value_width + 2))" '' "$state"
 }
 require_no_live_pi() {
     local cid count
@@ -68,36 +80,26 @@ idle_action() {
 }
 action=${1:-}; [[ -n "$action" ]] || invalid; shift
 case "$action" in
-    dev-list)
-        (( $# == 0 )) || invalid
-        projects=$(managed_projects | sort -u)
-        if [[ -z "$projects" ]]; then printf '「暂无开发容器」\n'; else
-            while IFS= read -r name; do
-                cid=$("${CORE[@]}" --project-name "$name" ps -aq pi)
-                if [[ -n "$cid" ]]; then
-                    directory=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}' "$cid")
-                    printf '项目目录：%s\n' "${directory:-未确认}"
-                    "${CORE[@]}" --project-name "$name" ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
-                fi
-            done <<< "$projects"
-        fi; exit 0 ;;
     dev-state)
         (( $# == 0 )) || invalid
-        "${CURRENT[@]}" ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
-        printf '\n源码版本：'; git -C "$REPO" describe --always --dirty 2>/dev/null || printf '源码包\n'
+        cid=$("${CURRENT[@]}" ps -aq pi)
+        state=$(container_status "$cid")
+        status_table '项目（宿主路径）' "$WORKDIR" "$state"
+        printf '\n工具源码：'; git -C "$REPO" describe --always --dirty 2>/dev/null || printf '源码包\n'
         built=$(docker image inspect --format '{{.Id}}' "$PIC_IMAGE" 2>/dev/null) || built=''
-        cid=$("${CURRENT[@]}" ps -q pi)
+        running=$("${CURRENT[@]}" ps -q pi)
         if [[ -n "$cid" ]]; then
             current=$(docker inspect --format '{{.Image}}' "$cid")
-            if [[ -z "$built" ]]; then printf '镜像：尚未构建或无法确认\n'
-            elif [[ "$current" == "$built" ]]; then printf '镜像：与已构建镜像一致\n'
-            else printf '镜像：有新镜像，选择「重建容器」应用\n'; fi
-            printf 'Pi 版本：'; docker exec --user "$PIC_UID:$PIC_GID" "$cid" pi --version || printf '未确认\n'
+            if [[ -z "$built" ]]; then printf '项目镜像：尚未构建或无法确认\n'
+            elif [[ "$current" == "$built" ]]; then printf '项目镜像：已是当前构建\n'
+            else printf '项目镜像：有新构建，选择「重建容器」应用\n'; fi
+        elif [[ -n "$built" ]]; then printf '项目镜像：已构建，启动 Pi 或管理终端时创建容器\n'
+        else printf '项目镜像：尚未构建或无法确认\n'; fi
+        if [[ -n "$running" ]]; then
+            printf '托管 Pi：'; docker exec --user "$PIC_UID:$PIC_GID" "$running" /usr/local/bin/pic-session count || printf '未确认\n'
+            printf 'Pi 版本：'; docker exec --user "$PIC_UID:$PIC_GID" "$running" pi --version || printf '未确认\n'
             printf 'Gateway 提交：'
-            docker exec --user "$PIC_UID:$PIC_GID" "$cid" git -C /home/node/.pi/agent/git/github.com/L4nterns/pi-provider-gateway rev-parse --short HEAD 2>/dev/null || printf '未确认，请用「pi list」查看\n'
-        else
-            printf '容器：未运行\n'
-            if [[ -n "$built" ]]; then printf '镜像：已构建\n'; else printf '镜像：尚未构建或无法确认\n'; fi
+            docker exec --user "$PIC_UID:$PIC_GID" "$running" git -C /home/node/.pi/agent/git/github.com/L4nterns/pi-provider-gateway rev-parse --short HEAD 2>/dev/null || printf '未确认，请用「pi list」查看\n'
         fi
         exit 0 ;;
     dev-logs)
@@ -114,16 +116,8 @@ case "$action" in
             docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session list
         else docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session close "$1"; fi
         session_lifecycle_unlock; exit 0 ;;
-    dev-remove|dev-remove-all|dev-stop)
+    dev-remove|dev-stop)
         (( $# == 0 )) || invalid
-        if [[ "$action" == dev-remove-all ]]; then
-            projects=$(managed_projects | sort -u); status=0
-            while IFS= read -r name; do
-                [[ -n "$name" ]] || continue
-                session_lifecycle_init "$REPO/.runtime/$name"; CURRENT=("${CORE[@]}" --project-name "$name")
-                session_require_idle idle_action "${CURRENT[@]}" down --remove-orphans || status=1
-            done <<< "$projects"; exit "$status"
-        fi
         init_lifecycle
         if [[ "$action" == dev-stop ]]; then session_require_idle idle_action "${CURRENT[@]}" stop pi
         else session_require_idle idle_action "${CURRENT[@]}" down --remove-orphans; fi
@@ -176,12 +170,11 @@ if [[ "$action" == service-* ]]; then
         service-stop) "${SERVICE_COMPOSE[@]}" stop services ;;
         service-remove) "${SERVICE_COMPOSE[@]}" down --remove-orphans ;;
         service-state)
-            "${SERVICE_COMPOSE[@]}" ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
-            printf '\n恢复策略：随 Docker 启动；手动停止后保持停止\n'
-            cid=$("${SERVICE_COMPOSE[@]}" ps -q services)
-            if [[ -n "$cid" ]]; then
-                docker inspect --format '当前重启策略：{{.HostConfig.RestartPolicy.Name}}' "$cid"
-            else printf '容器：未运行\n'; fi ;;
+            cid=$("${SERVICE_COMPOSE[@]}" ps -aq services)
+            state=$(container_status "$cid"); status_table '服务容器' '应用服务' "$state"
+            printf '\n持久数据：%s\n' "$DEPLOY_DATA_DIR"
+            if [[ -n "$cid" ]]; then docker inspect --format '恢复策略：{{.HostConfig.RestartPolicy.Name}}' "$cid"
+            else printf '恢复策略：unless-stopped（创建容器后生效）\n'; fi ;;
         service-logs) "${SERVICE_COMPOSE[@]}" logs --no-color --no-log-prefix --tail 200 services ;;
         service-build|service-rebuild)
             build_flags=(); [[ "$action" != service-rebuild ]] || build_flags+=(--no-cache)

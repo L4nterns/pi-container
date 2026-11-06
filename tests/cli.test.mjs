@@ -6,12 +6,12 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { pty } from "./helpers/pty.mjs";
-const up = "\x1b[A", down = "\x1b[B", esc = "\x1b", home = "\x1b[H";
+const down = "\x1b[B", esc = "\x1b", home = "\x1b[H";
 const select = index => home + down.repeat(index) + "\r";
-const exitMenu = select(0);
-const menuHint = "「↑/↓」选择 · 「Enter」确认 · 「Esc」返回";
+const exitMenu = esc;
+const menuHint = "「↑/↓」选择 · 「Enter」确认";
 const menus = (...inputs) => inputs.map(keys => [menuHint, keys]);
-const pause = ['「PgUp/PgDn」翻页 · 「Esc」返回', esc];
+const pause = ['「PgUp/PgDn」翻页', esc];
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const hostKey =
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZbxB6rD5TGtb2T/JKn4uf6eoWr5j2WT6eOo+CFc4JI";
@@ -59,6 +59,7 @@ async function fixture(t) {
 const fs=require('node:fs'),args=process.argv.slice(2);
 fs.appendFileSync(process.env.FAKE_LOG,JSON.stringify({args,workspace:process.env.PIC_WORKSPACE,uid:process.env.PIC_UID,gid:process.env.PIC_GID,groups:process.env.PIC_GROUPS,history:process.env.PIC_HISTORY_DIR,image:process.env.PIC_IMAGE,deployData:process.env.DEPLOY_DATA_DIR})+'\\n');
 if(args[0]==='image'){if(args.includes('inspect'))console.log(process.env.FAKE_BUILT_IMAGE||'sha256:built');}
+else if(args[0]==='inspect'&&args.some(a=>a.includes('.State.Status')))console.log((process.env.FAKE_CONTAINER_STATE||'running')+'\\t'+(process.env.FAKE_CONTAINER_EXIT||'0')+'\\t-');
 else if(args[0]==='inspect'&&args.some(a=>a.includes('.Mounts')))console.log(process.env.PIC_WORKSPACE);
 else if(args[0]==='inspect'&&args.some(a=>a.includes('.Config.Labels')))console.log('pic-r'+process.env.PIC_IMAGE.split(':r')[1]+'-u'+(process.env.FAKE_UID||'1000')+'-0123456789abcdef');
 else if(args[0]==='inspect'&&args.includes('{{.Image}}'))console.log(process.env.FAKE_CURRENT_IMAGE||'sha256:built');
@@ -77,9 +78,9 @@ else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='list'){if(pr
 else if(args.includes('logs'))console.log(process.env.FAKE_LOG_OUTPUT||'startup ready\\napplication error: synthetic diagnostic');
 else if(args[0]==='ps'&&args.includes('-aq')){if(process.env.FAKE_MANAGED)console.log('managed-container');}
 else if(args.includes('ps')&&!args.includes('-q')&&!args.includes('-aq'))console.log('SERVICE  STATE    STATUS\\n'+(args.includes('services')?'services':'pi')+'       running  Up');
-else if(args.includes('ps')&&(args.includes('-q')||args.includes('-aq'))){if(process.env.FAKE_PS_ERROR)process.exitCode=73;else if(process.env.FAKE_NO_CONTAINER!=='1')console.log('fake-container');}
+else if(args.includes('ps')&&(args.includes('-q')||args.includes('-aq'))){if(process.env.FAKE_PS_ERROR)process.exitCode=73;else if(process.env.FAKE_NO_CONTAINER!=='1'&&(!args.includes('-q')||process.env.FAKE_CONTAINER_STATE!=='exited'))console.log('fake-container');}
 else if(args[0]==='inspect')console.log(process.env.FAKE_EXECS||'0');
-else if(process.env.FAKE_INTERACTIVE==='1'&&(args[0]==='run'||args.includes('--dev-shell'))){console.log('SHELL-READY');require('node:readline').createInterface({input:process.stdin}).on('line',line=>{if(line==='exit')process.exit(0);});}
+else if(process.env.FAKE_INTERACTIVE==='1'&&(args[0]==='run'||args.includes('--dev-shell')||args.includes('--pic-session')||args.includes('attach'))){console.log('SHELL-READY');require('node:readline').createInterface({input:process.stdin}).on('line',line=>{if(line==='exit')process.exit(0);});}
 else if(args[0]==='run')process.exitCode=Number(process.env.FAKE_RUN_EXIT||0);
 else if(args.includes('exec'))process.exitCode=Number(process.env.FAKE_EXIT||0);
 `,
@@ -241,7 +242,8 @@ test("pi-container menu owns hosted processes, not native Pi conversation comman
   const r = await f.menu(menus("8" + exitMenu));
   assert.equal(r.exitCode, 0);
   assert.doesNotMatch(r.output, /Web|浏览器|18090|恢复历史对话|开始新对话/);
-  assert.match(r.output, /「↑\/↓」选择.*「Enter」确认.*「Esc」返回/);
+  assert.match(r.output, /「Esc」退出.*「↑\/↓」选择.*「Enter」确认/);
+  assert.doesNotMatch(r.output, /退出菜单|开发终端|开发容器|返回\s{2,}/);
   assert.doesNotMatch(r.output, /\d\) |请选择菜单中的编号/);
   assert.match(r.output, /接回 Pi.*继续原进程/);
   assert.match(r.output, /启动 Pi.*断开终端后继续运行/);
@@ -250,7 +252,7 @@ test("pi-container menu owns hosted processes, not native Pi conversation comman
 });
 test("menu connects selected live process, never creates a replacement or resumes history", async (t) => {
   const f = await fixture(t);
-  const r = await f.menu(menus(select(1), select(1), exitMenu), {
+  const r = await f.menu(menus(select(0), select(0)), {
     FAKE_RUNNING: "main\t0\t1700000000\n",
   });
   assert.equal(r.exitCode, 0, r.output);
@@ -266,13 +268,13 @@ test("menu connects selected live process, never creates a replacement or resume
 });
 test("menu launches only a hosted process; unknown running status never triggers a launch", async (t) => {
   const f = await fixture(t);
-  const r = await f.menu(menus(select(2), exitMenu));
+  const r = await f.menu(menus(select(1)));
   assert.equal(r.exitCode, 0);
   assert(
     r.calls.some((c) => c.args.slice(-2).join("|") === "--pic-session|start"),
   );
   assert(!r.calls.some(c => c.args.some(arg => ["--resume", "--continue", "--model", "--thinking"].includes(arg))));
-  const bad = await f.menu([...menus(select(1)), pause, ...menus(exitMenu)], { FAKE_LIST_ERROR: "1" });
+  const bad = await f.menu([...menus(select(0)), pause, ...menus(exitMenu)], { FAKE_LIST_ERROR: "1" });
   assert.equal(bad.exitCode, 0);
   assert.match(bad.output, /查询失败/);
   const errorAt = bad.output.indexOf('查询失败'), ackAt = bad.output.indexOf('「Esc」返回', errorAt);
@@ -281,7 +283,7 @@ test("menu launches only a hosted process; unknown running status never triggers
 });
 test("no running process is reported as absent, never auto-created", async (t) => {
   const f = await fixture(t);
-  const r = await f.menu([...menus(select(1)), pause, ...menus(exitMenu)], { FAKE_NO_CONTAINER: "1" });
+  const r = await f.menu([...menus(select(0)), pause, ...menus(exitMenu)], { FAKE_NO_CONTAINER: "1" });
   assert.equal(r.exitCode, 0);
   assert.match(r.output, /暂无运行中的 Pi/);
   assert(!r.calls.some(c => c.args.includes("up") || c.args.includes("--pic-session")));
@@ -289,27 +291,27 @@ test("no running process is reported as absent, never auto-created", async (t) =
 test("process selection and termination can be cancelled; termination requires confirmation", async (t) => {
   const f = await fixture(t);
   const env = { FAKE_RUNNING: "main\t0\t1700000000\n" };
-  for (const steps of [menus(select(1), exitMenu, exitMenu), menus(select(3), select(1), '\r', exitMenu)]) {
+  for (const steps of [menus(select(0), esc, exitMenu), menus(select(2), select(0), '\r', exitMenu)]) {
     const cancelled = await f.menu(steps, env);
     assert.equal(cancelled.exitCode, 0);
     assert(!cancelled.calls.some(c => c.args.includes("--pic-session") || c.args.includes("close")));
   }
-  const ended = await f.menu(menus(select(3), select(1), select(1), exitMenu), env);
+  const ended = await f.menu(menus(select(2), select(0), select(1), exitMenu), env);
   assert.equal(ended.exitCode, 0);
   assert(ended.calls.some(c => c.args.slice(-3).join("|") === "/usr/local/bin/pic-session|close|main"));
   assert(!ended.calls.some(c => c.args.includes("--pic-session")));
 });
 test("arrow menus cover service management, default-cancel confirmation and Escape without number shortcuts", async t => {
   const f = await fixture(t);
-  const cancelled = await f.menu(menus(select(6), select(8), '\r', esc, esc), { DEPLOY_DATA_DIR: './services-data' });
+  const cancelled = await f.menu(menus(select(4), select(7), '\r', esc, esc), { DEPLOY_DATA_DIR: './services-data' });
   assert.equal(cancelled.exitCode, 0, cancelled.output);
   assert.deepEqual(cancelled.calls, [], 'confirmation defaults to cancel; Escape returns without a side effect');
-  const state = await f.menu([...menus(select(6), select(1)), pause, ...menus(esc, esc)], { DEPLOY_DATA_DIR: './services-data' });
+  const state = await f.menu([...menus(select(4), select(0)), pause, ...menus(esc, esc)], { DEPLOY_DATA_DIR: './services-data' });
   assert.equal(state.exitCode, 0, state.output);
   assert(state.calls.some(c => c.args.includes('ps')));
-  const restored = await f.menu(menus(select(6), select(8), select(1), esc, esc), { DEPLOY_DATA_DIR: './services-data' });
+  const restored = await f.menu(menus(select(4), select(7), select(1), esc, esc), { DEPLOY_DATA_DIR: './services-data' });
   assert(restored.calls.some(c => c.args.includes('stop') && c.args.includes('services')));
-  const second = await f.menu(menus(select(1), select(2), up + '\r'), { FAKE_RUNNING: 'first\t0\t1700000000\nsecond\t0\t1700000001\n' });
+  const second = await f.menu(menus(select(0), select(1)), { FAKE_RUNNING: 'first\t0\t1700000000\nsecond\t0\t1700000001\n' });
   assert(second.calls.some(c => c.args.slice(-3).join('|') === '/usr/local/bin/pic-session|attach|second'));
 });
 test("private dispatcher rejects unrecognized operations before Docker", async (t) => {
@@ -320,6 +322,8 @@ test("private dispatcher rejects unrecognized operations before Docker", async (
     ["attach", "main"],
     ["services", "up"],
     ["unknown"],
+    ["dev-list"],
+    ["dev-remove-all"],
     ["pi-history"],
     ["pi-start", "--resume"],
     ["pi-connect", "a;id"],
@@ -428,7 +432,7 @@ test("image builds explain the explicit replacement step without recreating cont
     assert.equal(r.calls[0].args.includes("--no-cache"), action === "dev-rebuild");
     assert.match(r.stdout, /镜像构建完成.*重建容器.*现有容器仍使用原镜像/);
   }
-  const menu = await f.menu([...menus(select(5), select(5)), ['「Enter」下一项／空行开始', '\r'], pause, ...menus(exitMenu, exitMenu)]);
+  const menu = await f.menu([...menus(select(3), select(4)), ['「Enter」下一项／空行开始', '\r'], pause, ...menus(esc, exitMenu)]);
   assert.equal(menu.exitCode, 0, menu.output);
   assert.match(menu.output, /重建容器.*使用已构建镜像/);
   assert.match(menu.output, /镜像构建完成/);
@@ -637,20 +641,20 @@ test("Pi follows npm latest without an exact version or project lockfile", async
 test('menu positions survive operations and submenu returns only in the current invocation', async t => {
   const f = await fixture(t);
   const r = await f.menu([
-    ...menus(select(5), select(5)), ['「Enter」下一项／空行开始', '\r'], pause,
+    ...menus(select(3), select(4)), ['「Enter」下一项／空行开始', '\r'], pause,
     ...menus(esc, '\r', '\r'), ['「Enter」下一项／空行开始', '\r'], pause, ...menus(esc, exitMenu),
   ]);
   assert.equal(r.exitCode, 0, r.output);
   assert.equal(r.calls.filter(c => c.args.includes('build') && c.args.includes('--no-cache')).length, 2, 'main and dev positions are retained');
-  const fresh = await f.menu(menus(select(1), esc, exitMenu), { FAKE_RUNNING: 'main\t0\t1700000000\n' });
-  assert(fresh.calls.some(c => c.args.at(-1) === 'list'), 'a fresh invocation starts at the first item, Exit');
+  const fresh = await f.menu(menus('\r', esc, exitMenu), { FAKE_RUNNING: 'main\t0\t1700000000\n' });
+  assert(fresh.calls.some(c => c.args.at(-1) === 'list'), 'a fresh invocation starts at the first real action, Attach');
 });
 
 test('app autostart menu is persistent-policy-only and defaults to cancel', async t => {
   const f = await fixture(t), revision = 'a'.repeat(64);
   const env = { DEPLOY_DATA_DIR: './services-data', FAKE_APPS: `demo\ttrue\t${revision}\n` };
   const r = await f.menu([
-    ...menus(select(6), select(10), select(1), select(2), select(1), esc, esc, esc),
+    ...menus(select(4), select(9), select(0), select(1), select(1), esc, esc, esc),
   ], env);
   assert.equal(r.exitCode, 0, r.output);
   const set = r.calls.find(c => c.args.includes('/usr/local/bin/deploy-apps') && c.args.includes('set'));
@@ -658,19 +662,19 @@ test('app autostart menu is persistent-policy-only and defaults to cancel', asyn
   assert.match(r.output, /不.*当前进程|当前进程不变/);
   assert(!r.calls.some(c => c.args.some(arg => ['up', 'run', 'start', 'stop', 'restart', 'update', 'reread'].includes(arg))));
   await assert.rejects(fs.access(path.join(f.tool, 'services-data')), { code: 'ENOENT' });
-  const cancel = await f.menu(menus(select(6), select(10), select(1), select(2), '\r', esc, esc, esc), env);
+  const cancel = await f.menu(menus(select(4), select(9), select(0), select(1), '\r', esc, esc, esc), env);
   assert(!cancel.calls.some(c => c.args.includes('set')));
 });
 
 test('app policy query errors and missing service stay visible and never start a container', async t => {
   const f = await fixture(t);
-  for (const extra of [{ FAKE_NO_CONTAINER: '1' }, { FAKE_APP_ERROR: '1' }, { FAKE_APPS: 'invalid\n' }]) {
-    const r = await f.menu([...menus(select(6), select(10)), pause, ...menus(esc, esc)], { DEPLOY_DATA_DIR: './services-data', ...extra });
+  for (const [extra, message] of [[{ FAKE_NO_CONTAINER: '1' }, /服务容器未运行.*未自动启动或修改应用/], [{ FAKE_APP_ERROR: '1' }, /「读取失败」请检查服务容器/], [{ FAKE_APPS: 'invalid\n' }, /格式错误/]]) {
+    const r = await f.menu([...menus(select(4), select(9)), pause, ...menus(esc, esc)], { DEPLOY_DATA_DIR: './services-data', ...extra });
     assert.equal(r.exitCode, 0, r.output);
     assert(!r.calls.some(c => c.args.includes('up') || c.args.includes('set')));
-    assert.match(r.output, /读取失败|格式错误/);
+    assert.match(r.output, message);
   }
-  const malformed = await f.menu([...menus(select(1)), pause, ...menus(exitMenu)], { FAKE_RUNNING: 'not-valid\n' });
+  const malformed = await f.menu([...menus(select(0)), pause, ...menus(exitMenu)], { FAKE_RUNNING: 'not-valid\n' });
   assert.match(malformed.output, /进程状态格式错误/);
   assert(!malformed.calls.some(c => c.args.includes('up') || c.args.includes('attach')));
   const invalid = await f.run(['service-app-set', '../x', 'false', 'a'.repeat(64)]);
@@ -682,32 +686,40 @@ test('status queries show image/runtime boundaries without initialization, updat
   const r = await f.run(['dev-state'], { FAKE_CURRENT_IMAGE: 'sha256:older' });
   assert.equal(r.status, 0, r.stderr);
   assert.doesNotMatch(r.stdout, /sha256:|\{"|fake-container/);
-  assert.match(r.stdout, /镜像：有新镜像/); assert.match(r.stdout, /Pi 版本：1.5.0/);
+  assert.match(r.stdout, /镜像：有新构建/); assert.match(r.stdout, /Pi 版本：1.5.0/);
   assert.match(r.stdout, /synthetic-gateway-commit/);
   assert(!r.calls.some(c => c.args.some(a => ['up', 'config', 'build', 'install', 'update'].includes(a))));
   const absent = await f.run(['dev-state'], { FAKE_NO_CONTAINER: '1' });
-  assert.match(absent.stdout, /容器：未运行/);
+  assert.match(absent.stdout, /未创建/);
   assert(!absent.calls.some(c => c.args.includes('exec')));
+  const stopped = await f.run(['dev-state'], { FAKE_CONTAINER_STATE: 'exited', FAKE_CONTAINER_EXIT: '143' });
+  assert(stopped.stdout.includes(f.project)); assert.match(stopped.stdout, /已停止（退出码 143）/);
+  assert.doesNotMatch(stopped.stdout, /容器：未运行|SERVICE|托管 Pi|Pi 版本/);
+  assert(!stopped.calls.some(c => c.args.includes('exec')));
 });
 
-test('the entire menu tree shares aligned labels, common container order and Back as its first item', async t => {
+test('all menus omit navigation items, align action columns, and place Esc first at the bottom', async t => {
   const f = await fixture(t);
-  const r = await f.menu(menus(select(5), esc, select(6), esc, exitMenu));
+  const r = await f.menu(menus(select(3), esc, select(4), esc, exitMenu));
   assert.equal(r.exitCode, 0, r.output);
-  const plain = r.output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replaceAll('\r', '');
   const common = ['查看状态', '管理终端', '查看日志', '构建镜像', '无缓存构建', '重建容器', '停止容器', '删除容器'];
-  for (const kind of ['开发容器', '服务容器']) {
-    const frame = r.output.replaceAll('\r', '').split('\x1b[H\x1b[2J').find(s => s.startsWith(kind + '\n'));
-    assert(frame?.includes('> \x1b[7m返回'), `${kind}: Back is first and initially selected`);
+  const screens = r.output.split('\x1b[?25l\x1b[?2004h');
+  for (const kind of ['项目容器', '服务容器']) {
+    const frame = screens.find(s => s.includes(`\x1b[1m${kind}\x1b[0m`));
+    assert(frame?.includes('> \x1b[7m查看状态'), `${kind}: first action is selected`);
     let position = 0;
     for (const label of common) { const next = frame.indexOf(label, position); assert(next > position); position = next; }
+    assert(frame.includes('\x1b[35;1H\x1b[0m「Esc」返回 · 「↑/↓」选择 · 「Enter」确认'));
   }
-  for (const line of plain.split('\n').filter(s => /^(?:  |> )(?:接回 Pi|启动 Pi|开发容器|服务容器|无缓存构建|查看状态|管理终端|查看日志|应用自启动)\s/.test(s))) {
+  for (const chunk of r.output.split(/\x1b\[\d+;1H/)) {
+    const line = chunk.split('\x1b[K')[0].replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
+    if (!/^(?:  |> )(?:接回 Pi|启动 Pi|项目容器|服务容器|无缓存构建|查看状态|管理终端|查看日志|应用自启动)\s/.test(line)) continue;
     const prefix = /^(?:  |> )\S+(?: Pi)?\s+/.exec(line)?.[0];
     assert(prefix, line);
     const width = [...prefix].reduce((n, c) => n + (c.charCodeAt(0) > 127 ? 2 : 1), 0);
     assert.equal(width, 20, line);
   }
+  assert.doesNotMatch(r.output, /退出菜单|开发终端|开发容器|查看全部|清理空闲|\x1b\[2J/);
   assert.equal((r.output.match(/\x1b\[\?1049h/g) || []).length, 1);
   assert.equal((r.output.match(/\x1b\[\?1049l/g) || []).length, 1);
   assert.deepEqual(r.calls, []);
@@ -716,10 +728,10 @@ test('the entire menu tree shares aligned labels, common container order and Bac
 test('status, logs, builds and errors remain in one exclusive screen until Esc returns', async t => {
   const f = await fixture(t);
   const r = await f.menu([
-    ...menus(select(5), select(1)), pause,
-    ...menus(select(3)), pause,
-    ...menus(select(4)), ['「Enter」下一项／空行开始', '\r'], pause,
-    ...menus(esc, select(1)), pause, ...menus(exitMenu),
+    ...menus(select(3), select(0)), pause,
+    ...menus(select(2)), pause,
+    ...menus(select(3)), ['「Enter」下一项／空行开始', '\r'], pause,
+    ...menus(esc, select(0)), pause, ...menus(exitMenu),
   ], { FAKE_LIST_ERROR: '1' });
   assert.equal(r.exitCode, 0, r.output);
   assert.equal((r.output.match(/\x1b\[\?1049h/g) || []).length, 1);
@@ -729,21 +741,25 @@ test('status, logs, builds and errors remain in one exclusive screen until Esc r
   assert.match(r.output, /查询失败/);
 });
 
-test('normal Shell exit returns directly to the same menu, without a results page or extra key', async t => {
+test('Shell and Pi handoff ends the menu invocation; normal exit requires no further key', async t => {
   const f = await fixture(t);
-  for (const entry of [4, 5, 6]) {
-    const r = await f.menu([
-      ...menus(select(entry)), ...(entry === 4 ? [] : menus(select(2))),
-      ['SHELL-READY', 'exit\r'],
-      ...menus(...(entry === 4 ? [] : [esc]), exitMenu),
-    ], { FAKE_INTERACTIVE: '1', DEPLOY_DATA_DIR: './services-data' });
+  for (const steps of [menus(select(3), select(1)), menus(select(4), select(1)), menus(select(1)), menus(select(0), select(0))]) {
+    const r = await f.menu([...steps, ['SHELL-READY', 'exit\r']], { FAKE_INTERACTIVE: '1', DEPLOY_DATA_DIR: './services-data', FAKE_RUNNING: 'main\t0\t1700000000\n' });
     assert.equal(r.exitCode, 0, r.output);
     assert.doesNotMatch(r.output, /PgUp\/PgDn|按回车返回|连接已结束/);
     const after = r.output.slice(r.output.indexOf('SHELL-READY'));
-    if (entry !== 4) assert(after.includes(`\x1b[H\x1b[2J${entry === 5 ? '开发' : '服务'}容器`));
-    assert.equal((r.output.match(/\x1b\[\?1049h/g) || []).length, 2);
-    assert.equal((r.output.match(/\x1b\[\?1049l/g) || []).length, 2);
+    assert(!after.includes(menuHint));
+    assert.equal((r.output.match(/\x1b\[\?1049h/g) || []).length, 1);
+    assert.equal((r.output.match(/\x1b\[\?1049l/g) || []).length, 1);
   }
+  const failed = await f.menu(menus(select(4), select(1)));
+  assert.equal(failed.exitCode, 1, failed.output);
+  const primary = failed.output.slice(failed.output.indexOf('\x1b[?1049l'));
+  assert.match(primary, /先设置 DEPLOY_DATA_DIR/);
+  assert(!primary.includes(menuHint));
+  const logs = await f.menu([...menus(select(4), select(2)), pause, ...menus(esc, esc)]);
+  assert.match(logs.output, /先设置 DEPLOY_DATA_DIR/);
+  assert.match(logs.output, /操作失败.*退出码：1/);
 });
 
 test('both containers use readable state and prefix-free bounded logs without startup side effects', async t => {
@@ -753,7 +769,7 @@ test('both containers use readable state and prefix-free bounded logs without st
     const state = await f.run([`${kind}-state`], env);
     assert.equal(state.status, 0, state.stderr);
     assert.doesNotMatch(state.stdout, /sha256:|\{"|fake-container/);
-    assert(state.calls.some(c => c.args.includes('--format') && c.args.some(a => a.startsWith('table '))));
+    assert(state.calls.some(c => c.args.includes('ps') && c.args.includes('-aq')));
     const logs = await f.run([`${kind}-logs`], env);
     assert.equal(logs.status, 0, logs.stderr);
     assert.match(logs.stdout, /application error/);
@@ -761,19 +777,15 @@ test('both containers use readable state and prefix-free bounded logs without st
     assert.deepEqual(call.args.slice(-6), ['logs', '--no-color', '--no-log-prefix', '--tail', '200', kind === 'dev' ? 'pi' : 'services']);
     assert(![...state.calls, ...logs.calls].some(c => c.args.some(a => ['up', 'build', 'install', 'update'].includes(a))));
   }
-  const all = await f.run(['dev-list'], { FAKE_MANAGED: '1' });
-  assert.equal(all.status, 0, all.stderr);
-  assert(all.stdout.includes(`项目目录：${f.project}`));
-  assert.doesNotMatch(all.stdout, /pic-r|0123456789abcdef|managed-container|sha256:/);
 });
 
 test('build forms cancel without Docker and use identical optional arguments for both images', async t => {
   const f = await fixture(t);
-  for (const [entry, kind] of [[5, 'dev'], [6, 'service']]) {
-    const cancelled = await f.menu([...menus(select(entry), select(4)), ['「Enter」下一项／空行开始', esc], ...menus(esc, esc)]);
+  for (const [entry, kind] of [[3, 'dev'], [4, 'service']]) {
+    const cancelled = await f.menu([...menus(select(entry), select(3)), ['「Enter」下一项／空行开始', esc], ...menus(esc, esc)]);
     assert.deepEqual(cancelled.calls, []);
     const built = await f.menu([
-      ...menus(select(entry), select(5)), ['「Enter」下一项／空行开始', 'OPTION=value\r'],
+      ...menus(select(entry), select(4)), ['「Enter」下一项／空行开始', 'OPTION=value\r'],
       ['「Enter」下一项／空行开始', '\r'], pause, ...menus(esc, esc),
     ], { DEPLOY_DATA_DIR: './services-data' });
     assert.equal(built.exitCode, 0, built.output);
@@ -783,7 +795,7 @@ test('build forms cancel without Docker and use identical optional arguments for
   }
   const temporary = path.join(f.root, 'output-tmp'); await fs.mkdir(temporary);
   const failed = await f.menu([
-    ...menus(select(5), select(4)), ['「Enter」下一项／空行开始', '\r'], pause, ...menus(esc, esc),
+    ...menus(select(3), select(3)), ['「Enter」下一项／空行开始', '\r'], pause, ...menus(esc, esc),
   ], { TMPDIR: temporary, FAKE_BUILD_EXIT: '74' });
   assert.match(failed.output, /操作失败.*退出码：74/);
   assert.doesNotMatch(failed.output, /镜像构建完成|「已完成」/);

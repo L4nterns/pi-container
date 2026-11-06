@@ -50,6 +50,10 @@ test('output pages ignore Enter, page through diagnostics and return with a sing
   f.proc.write('\x1b[H'); await f.wait('LINE-1');
   const out = await f.finish('\x1b');
   assert(!out.includes('\x1b[31m'), 'captured log escape sequences are data, not instructions');
+  assert(!out.includes('\x1b[2J'), 'scrolling and paging never erase the whole screen');
+  assert.equal((out.match(/\x1b\[1m结果/g) ?? []).length, 1, 'unchanged heading is not repainted');
+  assert(out.includes('\x1b[10;1H\x1b[0m「Esc」返回 · 「↑/↓」滚动 · 「PgUp/PgDn」翻页'));
+  assert(out.includes('\x1b[9;1H'), 'line counts live in the footer, not above the content');
   assert(!out.includes('\ufffd'));
 });
 
