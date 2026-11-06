@@ -121,6 +121,7 @@ exec ${args.map(quote).join(' ')} "$@"
   await wait(() => second.output.includes('中文历史消息，显示正常 🟢') && second.output.includes('中文编辑输入'));
   assert.equal(await readFile(f.env.PIC_UTF8_PID, 'utf8'), originalPid);
   assert(!second.output.includes('Failed to load extension'));
+  assert(![first.output, second.output].some(output => output.includes('tmux extended-keys is off') || output.includes('tmux extended-keys-format is xterm')), 'the actual native Pi startup must not warn about the hosted tmux keyboard configuration');
   assert((await readFile(file, 'utf8')).startsWith(before), 'synthetic history is preserved; Pi may append native runtime metadata');
   assert.equal(f.run(['close', 'unicode']).status, 0);
   await wait(() => second.exited);

@@ -28,6 +28,7 @@ CI 分别运行普通检查、隔离 root 文件系统中的入口测试，以�
 | 部署状态隔离 | 活进程测试分别使用临时的已启用 / 未启用部署标记，不读取或修改实际 `/run/pic-ssh` 凭据 |
 | 中文终端 | 在 UTF-8 与继承的 C locale 下验证中文 / emoji 输出、输入及接回；真正的离线 Pi TUI 验证合成中文历史和编辑器 |
 | 终端颜色 | 检查 TERM / COLORTERM / COLORFGBG 穿过 Docker 边界；真实 tmux / PTY 验证 8 色、256 色、RGB 和接回后的颜色序列；原生 Pi TUI 库确认颜色能力检测 |
+| 组合按键 | 真实托管 tmux server 检查 `extended-keys=on`，支持格式选项时检查 `extended-keys-format=csi-u`（镜像为 3.5+）；真实原生离线 Pi 启动与接回不显示这两项配置警告；物理终端／嵌套 tmux 的端到端按键仍需宿主验收 |
 | 包引导 | 安装一次、失败重试、成功标记、卸载不复装、无效来源拒绝；配置、凭据和模型文件不被改写 |
 | 原生包路径 | 真实 `pi install` 生成不带点前缀的相对来源；原生 SDK 解析绝对、相对、HOME 和 file URL，保留包声明且不执行扩展代码 |
 | 服务边界 | skill 按需发现、标准 SSH/SFTP、健康检查、Supervisor、Nginx 和镜像装配规则 |

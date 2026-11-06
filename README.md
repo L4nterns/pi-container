@@ -116,6 +116,10 @@ Pi 退出、崩溃或容器 / 宿主重启后，原执行状态消失。可启�
 
 托管环境使用 Debian 的 `C.UTF-8`，宿主终端需支持 UTF-8 并提供中文字形。
 
+镜像内 tmux 3.5+ 使用 `extended-keys on` 与 `extended-keys-format csi-u`，让 Pi 按原生协议区分 Enter 与 Shift+Enter；不强制外层终端支持它没有的能力。整条终端链仍须能转发组合键，不能换行时可用原生 Ctrl+J。若出现 `tmux extended-keys is off`，说明当前 tmux server 尚未启用此配置，不影响模型或工具执行，但 Shift+Enter 可能被当作提交。
+
+配置随开发镜像更新，不会自动重启已有 tmux server 或 Pi；不要为消除警告运行 `tmux kill-server`，它会结束该 server 下的全部会话。非项目管理的 tmux 需在对应层单独配置，参见 Pi 的 [tmux 说明](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/tmux.md)。
+
 终端连接显式传递宿主的 `TERM`、`COLORTERM` 和 `COLORFGBG`，避免 Docker 的默认 `TERM=xterm` 让 tmux 把灰阶、256 色和 RGB 压成 8 种基础色。镜像提供 `ncurses-term` 终端描述数据；宿主应如实设置终端类型，非标准类型需要对应的 terminfo。
 
 只有 `COLORTERM=truecolor` 或 `24bit` 明确声明真彩色时，辅助程序才向 tmux 声明 RGB；否则由 TERM / terminfo 决定颜色能力，不一律强制真彩色。

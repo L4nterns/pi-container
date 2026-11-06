@@ -69,6 +69,15 @@ setInterval(() => {
     const original = await readFile(log, 'utf8');
     assert.equal(original.trim().split('\n').length, 1);
     assert.deepEqual(JSON.parse(await readFile(env.PIC_TEST_ARGS_LOG, 'utf8')), expectedArgs);
+    for (const [option, expected] of [['extended-keys', 'on'], ['extended-keys-format', 'csi-u']]) {
+      const actual = spawnSync(join(bin, 'tmux'), ['-L', 'pic', 'show', '-gv', option], { env, encoding: 'utf8', timeout: 5000 });
+      if (option === 'extended-keys-format' && actual.status !== 0) {
+        assert.match(actual.stderr, /invalid option/, 'older tmux may omit CSI-u, but unexpected errors still fail');
+      } else {
+        assert.equal(actual.status, 0, actual.stderr);
+        assert.equal(actual.stdout.trim(), expected, `real hosted tmux must enable Pi's ${option}`);
+      }
+    }
     assert.equal(run(['start', 'main']).status, 1, 'duplicate process must fail');
     const progress = async () => Number(await readFile(env.PIC_TEST_PROGRESS, 'utf8').catch(() => '0'));
     await wait(async () => await progress() > 0);
