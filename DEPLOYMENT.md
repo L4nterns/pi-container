@@ -22,7 +22,9 @@ DEPLOY_PUBLIC_URL=https://app-{app}.example.com
 
 SSH 终端是标准 Bash，可输入命令或在终端里执行脚本。它传递标准输入、输出、错误，有交互终端时分配 TTY；不挂载项目源码或 Pi 数据，不启动项目开发容器。
 
-启用部署后进入 Pi，`app-deployment` skill 会按需提供操作指导，也可使用 `/skill:app-deployment`。开发容器中可直接使用：
+启用部署时，启动新托管 Pi 或开发 Shell 会准备服务连接并登记 SSH 信任；**接回已有 Pi 不执行部署准备，也不启动或等待服务容器**。服务停止或故障不妨碍接回，但服务相关操作仍需先恢复服务。
+
+服务连接可用时，`app-deployment` skill 会按需提供操作指导，也可使用 `/skill:app-deployment`。开发容器中可直接使用：
 
 ```bash
 ssh app-services 'id; sudo -n id'

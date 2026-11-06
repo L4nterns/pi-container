@@ -8,7 +8,7 @@ ARG NPM_REGISTRY=https://registry.npmjs.org
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        bash ca-certificates curl git ripgrep fd-find util-linux openssh-client passwd acl tmux; \
+        bash ca-certificates curl git ripgrep fd-find util-linux openssh-client passwd acl tmux ncurses-term; \
     rm -rf /var/lib/apt/lists/*
 
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}

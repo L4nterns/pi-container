@@ -23,6 +23,20 @@ CORE=(docker compose --project-directory "$REPO" --file "$REPO/compose.yaml" --e
 CURRENT=("${CORE[@]}" --project-name "$PROJECT")
 invalid() { printf '无效内部操作；请直接运行 pi-container，在菜单中选择。\n' >&2; exit 2; }
 init_lifecycle() { session_lifecycle_init "$REPO/.runtime/$PROJECT"; }
+# Docker's TTY default is xterm (8 colors), not the terminal actually attached.
+TERMINAL_ENV=(--env "TERM=${TERM:-dumb}" --env "COLORTERM=${COLORTERM:-}" --env "COLORFGBG=${COLORFGBG:-}")
+require_existing_container() {
+    cid=$("${CURRENT[@]}" ps -q pi) || return
+    if [[ -z "$cid" ]]; then printf '项目容器不在运行，不能接回 Pi。\n' >&2; return 1; fi
+}
+compose_stop_if_idle() {
+    local cid exec_count
+    cid=$("${CURRENT[@]}" ps -q pi 2>/dev/null) || return 0
+    [[ -n "$cid" ]] || return 0
+    exec_count=$(docker inspect --format '{{len .ExecIDs}}' "$cid" 2>/dev/null) || return 0
+    if [[ "$exec_count" == 0 ]] && require_no_live_pi >/dev/null 2>&1; then "${CURRENT[@]}" stop pi >&2 || true; fi
+}
+finish_session() { local status=$?; trap - EXIT; session_finish compose_stop_if_idle; exit "$status"; }
 managed_projects() {
     local ids id name
     ids=$(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$REPO" --filter 'label=com.docker.compose.service=pi') || return
@@ -100,13 +114,23 @@ case "$action" in
     *) invalid ;;
 esac
 if [[ "$WORKDIR" == / && "$action" != service-* ]]; then printf '拒绝将宿主机根目录 / 挂载为工作区；请进入具体项目目录。\n' >&2; exit 2; fi
+if [[ "$action" == pi-connect ]]; then
+    # Attach to the existing process only: no Compose up, deployment setup,
+    # credential staging or package bootstrap. Keep the ordinary terminal lease.
+    init_lifecycle; trap finish_session EXIT
+    session_start require_existing_container
+    tty_flags=(-i); [[ ! -t 0 || ! -t 1 ]] || tty_flags=(-it)
+    docker exec "${tty_flags[@]}" "${TERMINAL_ENV[@]}" --user "$PIC_UID:$PIC_GID" --workdir /workspace \
+        "$cid" /usr/local/bin/pic-session attach "$1"
+    exit 0
+fi
 ENV_FILE="$REPO/.env"; [[ -f "$ENV_FILE" ]] || ENV_FILE="$REPO/.env.example"
 COMPOSE=(docker compose --project-directory "$REPO" --project-name "$PROJECT" --file "$REPO/compose.yaml" --env-file "$ENV_FILE")
 deployment_config
 if [[ "$action" == service-shell ]]; then
     provision_deployment; tty_flags=(); [[ ! -t 0 || ! -t 1 ]] || tty_flags=(-it)
     (( ${#tty_flags[@]} )) || tty_flags=(-i)
-    docker run --rm --init --pull never "${tty_flags[@]}" --security-opt no-new-privileges --network "$DEPLOY_NETWORK" \
+    docker run --rm --init --pull never "${tty_flags[@]}" "${TERMINAL_ENV[@]}" --security-opt no-new-privileges --network "$DEPLOY_NETWORK" \
         --mount "type=bind,source=$DEPLOY_CREDENTIAL_DIR,target=/run/deploy-credentials,readonly" \
         --tmpfs /run/pic-ssh:rw,noexec,nosuid,nodev,mode=0700 \
         --env "PIC_UID=$PIC_UID" --env "PIC_GID=$PIC_GID" --env "PIC_GROUPS=$PIC_GROUPS" \
@@ -133,22 +157,12 @@ compose_start() {
     "${COMPOSE[@]}" up -d --no-recreate pi >&2 || return
     if [[ "$UID_VALUE" == 0 ]]; then "${COMPOSE[@]}" exec -T pi /usr/local/bin/pic-workspace-init "$PIC_UID" >&2 || return; fi
 }
-compose_stop_if_idle() {
-    local cid exec_count
-    cid=$("${COMPOSE[@]}" ps -q pi 2>/dev/null) || return 0
-    [[ -n "$cid" ]] || return 0
-    exec_count=$(docker inspect --format '{{len .ExecIDs}}' "$cid" 2>/dev/null) || return 0
-    if [[ "$exec_count" == 0 ]] && require_no_live_pi >/dev/null 2>&1; then "${COMPOSE[@]}" stop pi >&2 || true; fi
-}
-finish_session() { local status=$?; trap - EXIT; session_finish compose_stop_if_idle; exit "$status"; }
 if [[ "$action" == dev-recreate ]]; then
     session_require_idle idle_action "${COMPOSE[@]}" up -d --force-recreate --no-build pi
 else
     trap finish_session EXIT; session_start compose_start
     case "$action" in
-        dev-shell) "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi /usr/local/bin/pic-entrypoint --dev-shell "$@" ;;
-        pi-start|pi-connect)
-            mode=start; [[ "$action" != pi-connect ]] || mode=attach
-            "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" --workdir /workspace pi /usr/local/bin/pic-entrypoint --pic-session "$mode" "$@" ;;
+        dev-shell) "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" "${TERMINAL_ENV[@]}" --workdir /workspace pi /usr/local/bin/pic-entrypoint --dev-shell "$@" ;;
+        pi-start) "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" "${TERMINAL_ENV[@]}" --workdir /workspace pi /usr/local/bin/pic-entrypoint --pic-session start "$@" ;;
     esac
 fi

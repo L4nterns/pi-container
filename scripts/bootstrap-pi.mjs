@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Online package bootstrap only. Provider configuration, credentials and protocols belong to Pi/extensions.
 import { readFile, mkdir, rename, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const agentDir = process.env.PI_CODING_AGENT_DIR || '/home/node/.pi/agent';
@@ -18,6 +18,7 @@ if (!Array.isArray(manifest.packages) || !manifest.packages.every(item =>
 )) throw new Error('Bootstrap packages must use online npm:/git: sources');
 const state = await json(markerPath, { version: 1, installed: [] });
 if (state.version !== 1 || !Array.isArray(state.installed) || !state.installed.every(source => typeof source === 'string')) throw new Error('Invalid Pi bootstrap state');
+let packageManager;
 for (const item of manifest.packages) {
   if (state.installed.includes(item.source)) continue;
   const settings = await json(join(agentDir, 'settings.json'), {});
@@ -25,9 +26,17 @@ for (const item of manifest.packages) {
   for (const entry of settings.packages ?? []) {
     const source = typeof entry === 'string' ? entry : entry?.source;
     if (source === item.source) { configured = true; break; }
-    if (!item.name || typeof source !== 'string' || !(source.startsWith('/') || source.startsWith('.'))) continue;
+    if (!item.name || typeof source !== 'string') continue;
+    // Native resolution handles bare relative paths, ~, file URLs and managed
+    // sources without loading extensions, installing packages or editing settings.
+    if (!packageManager) {
+      const { DefaultPackageManager, SettingsManager } = await import('@earendil-works/pi-coding-agent');
+      packageManager = new DefaultPackageManager({ cwd: agentDir, agentDir, settingsManager: SettingsManager.inMemory() });
+    }
+    const installedPath = packageManager.getInstalledPath(source, 'user');
+    if (!installedPath) continue;
     let existing;
-    try { existing = await json(join(resolve(agentDir, source), 'package.json')); }
+    try { existing = await json(join(installedPath, 'package.json')); }
     catch (error) { if (error.code === 'ENOTDIR') continue; throw error; }
     if (existing?.name === item.name) { configured = true; break; }
   }

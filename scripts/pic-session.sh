@@ -10,6 +10,9 @@ name=${2:-}
 valid_name() { [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ ]]; }
 [[ -z "$name" ]] || valid_name "$name" || { echo '进程标识无效。' >&2; exit 2; }
 TMUX_CMD=(tmux -L pic -f /opt/pic/config/tmux.conf)
+# Declare RGB only when the outer terminal explicitly advertises it. Otherwise
+# tmux uses TERM/terminfo; do not force a palette or a Pi theme.
+case "${COLORTERM:-}" in truecolor|24bit) TMUX_CMD+=(-T RGB) ;; esac
 exec 8>>"/tmp/pic-session-$(id -u).lock"
 flock -x 8
 list_sessions() {

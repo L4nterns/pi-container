@@ -52,13 +52,13 @@ const fs=require('node:fs'),args=process.argv.slice(2);
 fs.appendFileSync(process.env.FAKE_LOG,JSON.stringify({args,workspace:process.env.PIC_WORKSPACE,uid:process.env.PIC_UID,gid:process.env.PIC_GID,groups:process.env.PIC_GROUPS,history:process.env.PIC_HISTORY_DIR,image:process.env.PIC_IMAGE,deployData:process.env.DEPLOY_DATA_DIR})+'\\n');
 if(args[0]==='image')process.exitCode=0;
 else if(args[0]==='inspect'&&args.includes('{{.State.Running}}'))process.exitCode=1;
-else if(args.includes('config')&&args.includes('--environment'))for(const k of['DEPLOY_DATA_DIR','DEPLOY_PUBLIC_URL','DEPLOY_PORT'])console.log(k+'='+(process.env[k]||''));
+else if(args.includes('config')&&args.includes('--environment')){if(process.env.FAKE_CONFIG_ERROR)process.exitCode=72;else for(const k of['DEPLOY_DATA_DIR','DEPLOY_PUBLIC_URL','DEPLOY_PORT'])console.log(k+'='+(process.env[k]||''));}
 else if(args.includes('/usr/local/bin/deploy-register'))console.log(process.env.FAKE_HOST_KEY||${JSON.stringify(hostKey)});
 else if(args.includes('up'))process.exitCode=Number(process.env.FAKE_UP_EXIT||0);
 else if(args.includes('/usr/local/bin/pic-workspace-init'))process.exitCode=Number(process.env.FAKE_WORKSPACE_EXIT||0);
 else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='count'){if(process.env.FAKE_COUNT_ERROR)process.exitCode=1;else console.log(process.env.FAKE_LIVE_PI||'0');}
 else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='list'){if(process.env.FAKE_LIST_ERROR)process.exitCode=1;else process.stdout.write(process.env.FAKE_RUNNING||'');}
-else if(args.includes('ps')&&args.includes('-q')){if(process.env.FAKE_NO_CONTAINER!=='1')console.log('fake-container');}
+else if(args.includes('ps')&&args.includes('-q')){if(process.env.FAKE_PS_ERROR)process.exitCode=73;else if(process.env.FAKE_NO_CONTAINER!=='1')console.log('fake-container');}
 else if(args[0]==='inspect')console.log(process.env.FAKE_EXECS||'0');
 else if(args[0]==='run')process.exitCode=Number(process.env.FAKE_RUN_EXIT||0);
 else if(args.includes('exec'))process.exitCode=Number(process.env.FAKE_EXIT||0);
@@ -216,7 +216,7 @@ test("menu connects selected live process, never creates a replacement or resume
   assert.match(r.output, /后台运行.*没有终端连接/);
   assert(
     r.calls.some(
-      (c) => c.args.slice(-3).join("|") === "--pic-session|attach|main",
+      (c) => c.args.slice(-3).join("|") === "/usr/local/bin/pic-session|attach|main",
     ),
   );
   assert(
@@ -295,10 +295,51 @@ test("attachment failure never falls back to launching Pi or restoring history",
   assert.equal(r.status, 17);
   assert(
     r.calls.some(
-      (c) => c.args.slice(-3).join("|") === "--pic-session|attach|main",
+      (c) => c.args.slice(-3).join("|") === "/usr/local/bin/pic-session|attach|main",
     ),
   );
   assert(!r.calls.some((c) => c.args.includes("history") || c.args.includes("start") || c.args.includes("--resume")));
+});
+test("reattachment does not provision services, parse publishing config or initialize packages", async (t) => {
+  const f = await fixture(t);
+  await fs.writeFile(path.join(f.tool, ".env"), "invalid dotenv");
+  const r = await f.run(["pi-connect", "main"], {
+    DEPLOY_DATA_DIR: "./services-data", FAKE_CONFIG_ERROR: "1", FAKE_UP_EXIT: "71", FAKE_LIVE_PI: "1",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const attach = r.calls.find(c => c.args.includes("attach"));
+  assert(attach);
+  assert.equal(attach.args[0], "exec");
+  assert(attach.args.includes("1000:1000"));
+  assert(!r.calls.some(c => c.args.some(arg => ["up", "config", "stop", "/usr/local/bin/pic-entrypoint", "/usr/local/bin/deploy-register"].includes(arg))));
+  await assert.rejects(fs.access(path.join(f.tool, ".deploy-keys/installation")));
+  const projects = await fs.readdir(path.join(f.tool, ".runtime"));
+  assert.equal(projects.length, 1);
+  assert.deepEqual(await fs.readdir(path.join(f.tool, ".runtime", projects[0])), ["lifecycle.lock"], "ordinary terminal lease is released after attach exits");
+});
+test("missing or unreadable existing container never causes a reattachment startup", async (t) => {
+  const f = await fixture(t);
+  for (const [env, status] of [[{ FAKE_NO_CONTAINER: "1" }, 1], [{ FAKE_PS_ERROR: "1" }, 73]]) {
+    const r = await f.run(["pi-connect", "main"], env);
+    assert.equal(r.status, status, r.stderr);
+    assert(!r.calls.some(c => c.args.some(arg => ["up", "config", "attach", "stop"].includes(arg))));
+  }
+});
+test("terminal identity and color hints cross all Docker terminal boundaries without forcing a theme", async (t) => {
+  const f = await fixture(t);
+  const terminal = { TERM: "xterm-256color", COLORTERM: "truecolor", COLORFGBG: "15;0" };
+  for (const action of [["pi-start"], ["pi-connect", "main"], ["dev-shell"], ["service-shell"]]) {
+    const r = await f.run(action, { ...terminal, DEPLOY_DATA_DIR: "./services-data", FAKE_LIVE_PI: "1" });
+    assert.equal(r.status, 0, r.stderr);
+    const client = r.calls.find(c => c.args.includes("attach") || c.args.includes("--pic-session") || c.args.includes("--dev-shell") || c.args.includes("--service-shell"));
+    assert(client, action.join(" "));
+    for (const [key, value] of Object.entries(terminal)) {
+      const index = client.args.indexOf(`${key}=${value}`);
+      assert(index > 0, key);
+      assert.equal(client.args[index - 1], "--env");
+    }
+    assert(!client.args.some(arg => /use-theme|PI_TRUE_COLOR|PI_THEME/.test(arg)));
+  }
 });
 test("maintenance works without optional publishing config; build args precede service", async (t) => {
   const f = await fixture(t);

@@ -20,7 +20,8 @@ async function fixture(t, inheritedLocale) {
   const root = await mkdtemp(join(tmpdir(), 'pic-utf8-terminal-'));
   const bin = join(root, 'bin'), workspace = join(root, 'project');
   await mkdir(bin); await mkdir(workspace);
-  const config = resolve('config/tmux.conf'), helper = resolve('scripts/pic-session.sh');
+  const config = resolve('config/tmux.conf'), helper = join(root, 'pic-session.sh');
+  await writeFile(helper, (await readFile(resolve('scripts/pic-session.sh'), 'utf8')).replaceAll('/run/pic-ssh/known_hosts', join(root, 'known_hosts')));
   await writeFile(join(bin, 'tmux'), `#!/usr/bin/env bash
 args=("$@")
 for i in "\${!args[@]}"; do

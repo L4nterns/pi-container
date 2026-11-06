@@ -4,13 +4,13 @@ import { mkdtemp, writeFile, readFile, rm, access, mkdir } from 'node:fs/promise
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 const script = fileURLToPath(new URL('../scripts/bootstrap-pi.mjs', import.meta.url));
 async function setup(t) {
   const dir=await mkdtemp(join(tmpdir(),'pic-package-test-'));t.after(()=>rm(dir,{recursive:true,force:true}));
   const manifest=join(dir,'manifest.json');const log=join(dir,'install.log');const fake=join(dir,'pi');
   await writeFile(fake, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_INSTALL_LOG"\nexit "${TEST_INSTALL_STATUS:-0}"\n', {mode:0o700});
-  return {dir,manifest,log,run:(extra={})=>spawnSync(process.execPath,[script],{encoding:'utf8',env:{...process.env,PI_CODING_AGENT_DIR:dir,PIC_PI_BOOTSTRAP_MANIFEST:manifest,PIC_PI_BINARY:fake,TEST_INSTALL_LOG:log,...extra}})};
+  return {dir,manifest,log,run:(extra={})=>spawnSync(process.execPath,[script],{encoding:'utf8',env:{...process.env,PI_CODING_AGENT_DIR:dir,HOME:dir,PIC_PI_BOOTSTRAP_MANIFEST:manifest,PIC_PI_BINARY:fake,TEST_INSTALL_LOG:log,...extra}})};
 }
 test('online bootstrap installs once, does not resurrect removed packages or mutate provider files',async t=>{
   const s=await setup(t);const source='git:github.com/example/independent-provider';
@@ -30,6 +30,37 @@ test('an already configured same-name local package is preserved without duplica
   await writeFile(s.manifest,JSON.stringify({packages:[{source:'git:github.com/example/independent-provider',name:'independent-provider'}]}));
   assert.equal(s.run().status,0);await assert.rejects(access(s.log));
   assert.equal(await readFile(join(s.dir,'settings.json'),'utf8'),settings);
+});
+test('native pi install stores a bare relative source; bootstrap preserves it without installing again',async t=>{
+  const s=await setup(t),existing=join(s.dir,'user-package');await mkdir(existing);
+  await writeFile(join(existing,'package.json'),JSON.stringify({name:'independent-provider',version:'1.0.0',pi:{extensions:[]}}));
+  await writeFile(join(s.dir,'settings.json'),JSON.stringify({enableInstallTelemetry:false,enableAnalytics:false}));
+  const cli=fileURLToPath(new URL('../node_modules/@earendil-works/pi-coding-agent/dist/cli.js',import.meta.url));
+  const installed=spawnSync(process.execPath,[cli,'install',existing],{
+    cwd:s.dir,encoding:'utf8',timeout:15000,
+    env:{PATH:process.env.PATH,HOME:s.dir,PI_CODING_AGENT_DIR:s.dir,PI_OFFLINE:'1',PI_SKIP_VERSION_CHECK:'1',...(process.env.LD_LIBRARY_PATH?{LD_LIBRARY_PATH:process.env.LD_LIBRARY_PATH}:{})},
+  });
+  assert.equal(installed.status,0,installed.stderr);
+  const settings=await readFile(join(s.dir,'settings.json'),'utf8');
+  assert.deepEqual(JSON.parse(settings).packages,['user-package']);
+  await writeFile(s.manifest,JSON.stringify({packages:[{source:'git:github.com/example/independent-provider',name:'independent-provider'}]}));
+  const result=s.run();assert.equal(result.status,0,result.stderr);
+  await assert.rejects(access(s.log));
+  assert.equal(await readFile(join(s.dir,'settings.json'),'utf8'),settings);
+});
+test('same-name detection uses native absolute, relative, home and file URL resolution without loading package code',async t=>{
+  const s=await setup(t),existing=join(s.dir,'user-package');await mkdir(existing);
+  await writeFile(join(existing,'package.json'),JSON.stringify({name:'independent-provider',version:'1.0.0',pi:{extensions:['do-not-load.js']}}));
+  await writeFile(join(existing,'do-not-load.js'),'throw new Error("bootstrap must not execute extension code");\n');
+  await writeFile(s.manifest,JSON.stringify({packages:[{source:'git:github.com/example/independent-provider',name:'independent-provider'}]}));
+  for(const source of [existing,'./user-package','user-package','~/user-package',pathToFileURL(existing).href]){
+    await rm(join(s.dir,'.pic-packages.json'),{force:true});
+    const settings=JSON.stringify({packages:[{source,extensions:[]}]});
+    await writeFile(join(s.dir,'settings.json'),settings);
+    const result=s.run();assert.equal(result.status,0,`${source}: ${result.stderr}`);
+    await assert.rejects(access(s.log));
+    assert.equal(await readFile(join(s.dir,'settings.json'),'utf8'),settings);
+  }
 });
 test('local package paths and malformed online sources fail before installation',async t=>{
   const s=await setup(t);

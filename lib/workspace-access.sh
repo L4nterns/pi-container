@@ -14,7 +14,7 @@ uid=$1
 if [ ! -d /workspace ] || [ -L /workspace ]; then echo 'Missing workspace directory' >&2; exit 1; fi
 # Physical traversal: never follow repository symlinks into other host files.
 # Defaults allow newly created root-owned files to inherit development access
-# when their creation mode allows it; rescan on every pic terminal connection as well.
+# when their creation mode allows it; rescan when starting Pi or a development shell.
 find /workspace -xdev -type d -uid 0 -exec setfacl -P -m "u:$uid:rwx,d:u:$uid:rwx" -- {} +
 find /workspace -xdev -type f -uid 0 -exec setfacl -P -m "u:$uid:rwX" -- {} +
 # The mounted source is trusted by the host operator, even when root owns .git.
