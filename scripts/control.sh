@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Private operation dispatcher for the terminal menu.
-# Not a public CLI; bin/pic is the only user-facing command.
+# Not a public CLI; bin/pi-container is the only user-facing command.
 set -euo pipefail
 SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
 REPO=$(cd -- "$(dirname -- "$SCRIPT")/.." && pwd -P)
@@ -21,7 +21,7 @@ export PIC_UID PIC_GID PIC_GROUPS
 export PIC_HISTORY_DIR="/home/node/.pi/agent/project-history/${UID_VALUE}-${HASH}"
 CORE=(docker compose --project-directory "$REPO" --file "$REPO/compose.yaml" --env-file "$REPO/.env.example")
 CURRENT=("${CORE[@]}" --project-name "$PROJECT")
-invalid() { printf '无效内部操作；请直接运行 pic，在菜单中选择。\n' >&2; exit 2; }
+invalid() { printf '无效内部操作；请直接运行 pi-container，在菜单中选择。\n' >&2; exit 2; }
 init_lifecycle() { session_lifecycle_init "$REPO/.runtime/$PROJECT"; }
 managed_projects() {
     local ids id name
@@ -40,7 +40,7 @@ require_no_live_pi() {
     # No old-image fallback: missing helper is an error, never proof of idleness.
     count=$(docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session count) || return
     [[ "$count" =~ ^[0-9]+$ ]] || { printf '无法确认运行中 Pi 的状态；拒绝继续。\n' >&2; return 1; }
-    if [[ "$count" != 0 ]]; then printf '仍有 %s 个 Pi 进程在运行。请在 pic 菜单中接回或结束它们。\n' "$count" >&2; return 1; fi
+    if [[ "$count" != 0 ]]; then printf '仍有 %s 个 Pi 进程在运行。请在 pi-container 菜单中接回或结束它们。\n' "$count" >&2; return 1; fi
 }
 idle_action() {
     local cid count

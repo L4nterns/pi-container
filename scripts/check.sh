@@ -2,7 +2,7 @@
 set -euo pipefail
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 cd "$REPO"
-for file in bin/pic lib/*.sh scripts/*.sh tests/docker-smoke.sh tests/helpers/docker-smoke.sh skills/app-deployment/examples/python/setup.sh; do bash -n "$file"; done
+for file in bin/pi-container lib/*.sh scripts/*.sh tests/docker-smoke.sh tests/helpers/docker-smoke.sh skills/app-deployment/examples/python/setup.sh; do bash -n "$file"; done
 for file in pic-entrypoint.sh services/*.sh tests/fixtures/*.sh; do sh -n "$file"; done
 if command -v python3 >/dev/null 2>&1; then
     python3 - <<'PY'
@@ -18,7 +18,7 @@ fi
 node --test tests/*.test.mjs
 git diff --check
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck -x bin/pic lib/*.sh pic-entrypoint.sh services/*.sh tests/fixtures/*.sh scripts/*.sh tests/docker-smoke.sh tests/helpers/docker-smoke.sh skills/app-deployment/examples/python/setup.sh
+    shellcheck -x bin/pi-container lib/*.sh pic-entrypoint.sh services/*.sh tests/fixtures/*.sh scripts/*.sh tests/docker-smoke.sh tests/helpers/docker-smoke.sh skills/app-deployment/examples/python/setup.sh
 else
     printf 'ShellCheck 未安装；跳过静态 lint（CI 中强制执行）。\n' >&2
 fi

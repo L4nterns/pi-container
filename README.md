@@ -1,15 +1,15 @@
-# Pi in Container · `pic`
+# Pi in Container · `pi-container`
 
 在容器中运行原生 [Pi Coding Agent](https://github.com/earendil-works/pi)，托管仍在输出或执行工具的 Pi 进程，断开终端后再接回同一个进程，并管理开发容器与独立服务容器。宿主无需安装 Node.js 或 Pi。
 
 项目仓库：[L4nterns/pic](https://github.com/L4nterns/pic)。网关插件独立维护于公开仓库 [L4nterns/pi-provider-gateway](https://github.com/L4nterns/pi-provider-gateway)，不随 pic 提交或打包源码。
 
-**宿主入口只记 `pic`，通过菜单管理运行环境和活进程。** 它不是 `pi` 的缩写或参数转发器，不重新包装 Pi 的对话命令，也不提供旧命令兼容入口。本版仅保留终端功能，没有浏览器控制台、管理 HTTP API 或后台管理网站。
+**宿主入口只记 `pi-container`，通过菜单管理运行环境和活进程。** 它不是 `pi` 的缩写或参数转发器，不重新包装 Pi 的对话命令，也不提供旧命令兼容入口。本版仅保留终端功能，没有浏览器控制台、管理 HTTP API 或后台管理网站。
 
 | 负责方 | 职责 |
 |---|---|
 | 原生 `pi` | 对话、`/new`、`/resume`、`/compact`、模型、思考档位、provider 与插件 |
-| `pic` | 容器生命周期、启动并托管进程、断开后保持运行、重新接回原进程、明确结束进程 |
+| `pi-container` | 容器生命周期、启动并托管进程、断开后保持运行、重新接回原进程、明确结束进程 |
 
 截至本轮核对，原生 Pi 的 `pi --resume` / `--continue` 恢复的是磁盘历史，**不是接回一个仍在输出的 TUI 进程**；RPC 也不是附着到既有交互终端的命令。pic 通过容器内 tmux 补上这层进程与终端生命周期管理，不修改 Pi 原生命令。账号、路由、额度仍由上游管理。
 
@@ -17,7 +17,7 @@
 
 需要 Linux、Bash 4.1+、GNU coreutils、`flock`，及有权限使用的本机 Docker Engine / Compose v2。部署功能另需 OpenSSH 客户端。不支持远程 Docker、原生 Windows，WSL 请使用 Linux 环境。
 
-**入口名称冲突：** groff 也提供 `pic`。与 groff 共存时，先不要创建下面的全局 `pic` 链接；可以用本仓库 `bin/pic` 的绝对路径启动菜单。不要覆盖 `/usr/bin/pic` 或靠 PATH 优先级抢占系统命令。公开入口的新名称待确认，仓库名与数据路径不因此自动迁移。
+**避免系统命令冲突：** 公开入口使用 `pi-container`，不提供 `pic` 别名，groff 的 `pic` 保持原样。仓库仍名为 `pic`，内部容器身份、环境变量和数据路径不变。已有安装若曾自行创建 `pic` 链接，请先核实它确实指向本项目再手工移除；不要删除系统 groff 程序，源码也不会自动修改宿主链接。
 
 以下只用于**全新安装**；已有配置、凭据和业务数据不要覆盖。本仓库提供源码，尚未发布预构建镜像。
 
@@ -28,12 +28,12 @@ printf 'DEPLOY_DATA_DIR=\n' > .env
 
 if [ "$(id -u)" = 0 ]; then BIN_DIR=/usr/local/bin; else BIN_DIR="$HOME/.local/bin"; fi
 mkdir -p "$BIN_DIR"
-ln -s "$PWD/bin/pic" "$BIN_DIR/pic"
+ln -s "$PWD/bin/pi-container" "$BIN_DIR/pi-container"
 export PATH="$BIN_DIR:$PATH"
 
 mkdir -p ~/projects/demo
 cd ~/projects/demo
-pic
+pi-container
 ```
 
 普通用户将 PATH 配置保存在 Shell 启动文件中。首次打开菜单，先选「开发容器管理 → 构建镜像」，再选「启动并托管 Pi」。构建可逐行填写 `KEY=value` build args，直接回车表示不添加。不要在 build args 中放密码。
@@ -60,7 +60,7 @@ Docker 可能复用已有的依赖安装层，不代表每次普通构建都会�
 
 ## 菜单：只管理运行环境和活进程
 
-在具体项目目录运行 `pic`：
+在具体项目目录运行 `pi-container`：
 
 ```text
 1) 接回运行中的 Pi       同一进程，继续查看输出和操作
@@ -88,7 +88,7 @@ Docker 可能复用已有的依赖安装层，不代表每次普通构建都会�
 
 1. 在菜单选「启动并托管 Pi」，进入 Pi 后正常提交任务。
 2. 输出或工具仍在进行时，用 `Ctrl+B d` 断开，或关闭宿主 SSH 终端。
-3. 再次登录宿主，进入同一项目，运行 `pic`，选「接回运行中的 Pi」。
+3. 再次登录宿主，进入同一项目，运行 `pi-container`，选「接回运行中的 Pi」。
 4. 选中原进程，继续查看其当前输出和操作。原进程若仍存活，不应改用 `/resume` 或启动另一个 Pi 来替代接回。
 
 多个终端可连接同一进程并共享输入与显示，不是隔离观察者，请避免同时输入。tmux 保存终端状态和有限滚屏，不是无限日志或任务检查点，也不能修复模型服务本身的断流。
@@ -105,7 +105,7 @@ Pi 自己退出、容器 / 宿主重启或进程崩溃后，原执行状态已�
 
 ## 远程终端与权限
 
-远程使用时，先通过自己的 SSH 登录宿主，在项目目录运行 `pic`；不额外开放管理网站、管理端口或 Docker API。Docker 操作由宿主当前用户执行，仍要求该用户已有相应权限；取消网页不等于取消宿主 Docker 权限。Pi 与应用容器不挂载 Docker socket，详见 [SECURITY.md](SECURITY.md)。
+远程使用时，先通过自己的 SSH 登录宿主，在项目目录运行 `pi-container`；不额外开放管理网站、管理端口或 Docker API。Docker 操作由宿主当前用户执行，仍要求该用户已有相应权限；取消网页不等于取消宿主 Docker 权限。Pi 与应用容器不挂载 Docker socket，详见 [SECURITY.md](SECURITY.md)。
 
 ## 服务与持久数据
 
@@ -122,7 +122,7 @@ Pi 自己退出、容器 / 宿主重启或进程崩溃后，原执行状态已�
 
 ## 无旧版兼容层
 
-本版只有 `pic` 菜单，不保留旧命令别名、旧多词入口、旧环境变量、旧镜像路径或迁移标记识别。开发容器使用 `pic-*` 身份，运行时路径 `/opt/pic`；不自动接管旧版容器，也不迁移旧历史目录。
+本版只有 `pi-container` 菜单，不保留 `pic` / `devctl` 别名、旧多词入口、旧环境变量、旧镜像路径或迁移标记识别。开发容器使用 `pic-*` 身份，运行时路径 `/opt/pic`；本次仅调整宿主公开命令名，不更改容器身份、安装位置或数据路径。不自动接管更早版本的容器，也不迁移旧历史目录。
 
 这不意味着删除旧数据：源码改动没有清空原配置、凭据、模型例外、历史或业务目录。已有安装应先备份并自行停止旧容器，明确处理已有身份与数据，再安装本版；不要新旧版本同时写同一份持久数据，也不要覆盖现有 `.env`。本次交付和源码推送不表示已更新不可见的宿主安装或发布镜像。
 

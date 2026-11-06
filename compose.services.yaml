@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: services/Dockerfile
-    image: ${DEPLOY_IMAGE:?由 pic 命令设置}
+    image: ${DEPLOY_IMAGE:?由 pi-container 命令设置}
     init: true
     restart: unless-stopped
     logging:
@@ -32,4 +32,4 @@ services:
 
 networks:
   deployments:
-    name: ${DEPLOY_NETWORK:?由 pic 命令设置}
+    name: ${DEPLOY_NETWORK:?由 pi-container 命令设置}

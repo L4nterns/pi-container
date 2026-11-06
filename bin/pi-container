@@ -4,19 +4,19 @@ set -euo pipefail
 SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
 REPO=$(cd -- "$(dirname -- "$SCRIPT")/.." && pwd -P)
 help_text() {
-    printf '%s\n' 'Pi in Container' '用法：pic' \
+    printf '%s\n' 'Pi in Container' '用法：pi-container' \
         '  接回运行中的 Pi：连接原进程，任务继续。' \
         '  启动并托管 Pi：容器内启动进程，断开终端后继续运行。' \
         '  结束运行中的 Pi：停止进程，不删除对话历史。' \
-        '  对话、历史、模型和插件由 Pi 原生功能管理；pic 不转发 Pi 参数。' \
+        '  对话、历史、模型和插件由 Pi 原生功能管理；pi-container 不转发 Pi 参数。' \
         '  Shell、开发容器和服务容器管理均在菜单中。' \
         '断开：Ctrl+B，再按 D；结束：在菜单明确选择结束进程。'
 }
 if (( $# )); then
     if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then help_text; exit 0; fi
-    printf '不接受子命令。请只输入 pic，在菜单中选择。\n' >&2; exit 2
+    printf '不接受子命令。请只输入 pi-container，在菜单中选择。\n' >&2; exit 2
 fi
-if [[ ! -t 0 || ! -t 1 ]]; then printf 'pic 需要交互终端；请直接在终端运行 pic。\n' >&2; exit 2; fi
+if [[ ! -t 0 || ! -t 1 ]]; then printf 'pi-container 需要交互终端；请直接在终端运行 pi-container。\n' >&2; exit 2; fi
 CONTROL="$REPO/scripts/control.sh"
 choose() { local value; read -r -p '选择（0 返回）：' value || return 1; printf '%s' "$value"; }
 confirm() { local value; read -r -p "$1 [y/N]：" value || return 1; [[ "$value" == y || "$value" == Y ]]; }

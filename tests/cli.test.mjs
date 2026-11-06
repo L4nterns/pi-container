@@ -25,7 +25,7 @@ async function fixture(t) {
     await fs.mkdir(path.join(tool, d), { recursive: true });
   for (const d of [project, fakeBin, path.join(tool, ".deploy-keys")]) await fs.mkdir(d);
   for (const f of [
-    "bin/pic",
+    "bin/pi-container",
     "scripts/control.sh",
     "lib/session-lifecycle.sh",
     "lib/deployment.sh",
@@ -92,7 +92,7 @@ else if(args.includes('exec'))process.exitCode=Number(process.env.FAKE_EXIT||0);
     return { ...r, calls: await calls() };
   }
   async function publicRun(args = [], env = {}) {
-    const r = spawnSync("bash", [path.join(tool, "bin/pic"), ...args], {
+    const r = spawnSync("bash", [path.join(tool, "bin/pi-container"), ...args], {
       cwd: project,
       encoding: "utf8",
       env: environment(env),
@@ -101,7 +101,7 @@ else if(args.includes('exec'))process.exitCode=Number(process.env.FAKE_EXIT||0);
     return { ...r, calls: await calls() };
   }
   async function menu(input, env = {}) {
-    const proc = pty.spawn("/bin/bash", [path.join(tool, "bin/pic")], {
+    const proc = pty.spawn("/bin/bash", [path.join(tool, "bin/pi-container")], {
       cwd: project,
       env: environment(env),
       cols: 110,
@@ -118,15 +118,20 @@ else if(args.includes('exec'))process.exitCode=Number(process.env.FAKE_EXIT||0);
     clearTimeout(timeout);
     return { ...result, output, calls: await calls() };
   }
-  return { root, tool, project, run, publicRun, menu };
+  return { root, tool, project, fakeBin, environment, calls, run, publicRun, menu };
 }
-test("public command is only pic: help and rejected old syntax have no Docker side effects", async (t) => {
+test("public command is only pi-container: help and rejected old syntax have no Docker side effects", async (t) => {
   const f = await fixture(t);
   const help = await f.publicRun(["--help"]);
   assert.equal(help.status, 0);
+  assert.match(help.stdout, /用法：pi-container/);
   assert.match(help.stdout, /启动并托管 Pi.*断开终端后继续运行/);
-  assert.doesNotMatch(help.stdout, /恢复历史对话|开始新对话/);
-  assert(!help.stdout.includes("pic attach"));
+  assert.doesNotMatch(help.stdout, /恢复历史对话|开始新对话|用法：pic|pi-container attach/);
+  assert.deepEqual(help.calls, []);
+  const shortHelp = await f.publicRun(["-h"]);
+  assert.equal(shortHelp.status, 0);
+  assert.equal(shortHelp.stdout, help.stdout);
+  assert.deepEqual(shortHelp.calls, []);
   for (const args of [
     [],
     ["new"],
@@ -140,6 +145,8 @@ test("public command is only pic: help and rejected old syntax have no Docker si
     assert.equal(r.status, 2);
     assert.deepEqual(r.calls, []);
   }
+  assert.deepEqual(await fs.readdir(path.join(repo, "bin")), ["pi-container"]);
+  await assert.rejects(fs.access(path.join(repo, "bin/pic")));
   await assert.rejects(fs.access(path.join(repo, "bin/devctl")));
   await assert.rejects(fs.access(path.join(repo, "dev-entrypoint.sh")));
   for (const file of [
@@ -154,7 +161,42 @@ test("public command is only pic: help and rejected old syntax have no Docker si
       /DEVCTL_|DEV_(UID|GID|GROUPS|IMAGE|WORKSPACE|SESSION_DIR)|\/opt\/devctl|\.devctl-/,
     );
 });
-test("pic menu owns hosted processes, not native Pi conversation commands", async (t) => {
+test("installed pi-container symlink coexists with system pic without replacing or invoking it", async (t) => {
+  const f = await fixture(t);
+  const groff = path.join(f.fakeBin, "pic"), installed = path.join(f.fakeBin, "pi-container");
+  const original = '#!/bin/sh\nprintf "groff-pic-sentinel\\n"\n';
+  await fs.writeFile(groff, original, { mode: 0o755 });
+  const originalMode = (await fs.stat(groff)).mode & 0o777;
+  await fs.symlink(path.join(f.tool, "bin/pi-container"), installed);
+  const env = f.environment();
+  const system = spawnSync("pic", ["--version"], { cwd: f.project, env, encoding: "utf8", timeout: 5000 });
+  assert.equal(system.status, 0, system.stderr);
+  assert.equal(system.stdout, "groff-pic-sentinel\n");
+  const help = spawnSync("pi-container", ["--help"], { cwd: f.project, env, encoding: "utf8", timeout: 5000 });
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /用法：pi-container/);
+  const piped = spawnSync("pi-container", [], { cwd: f.project, env, input: "0\n", encoding: "utf8", timeout: 5000 });
+  assert.equal(piped.status, 2);
+  assert.match(piped.stderr, /pi-container 需要交互终端/);
+  const proc = pty.spawn("pi-container", [], { cwd: f.project, env, cols: 110, rows: 35 });
+  const exit = new Promise(resolve => proc.onExit(resolve));
+  const timeout = setTimeout(() => proc.kill("SIGTERM"), 8000);
+  t.after(() => clearTimeout(timeout));
+  let output = "", sent = false;
+  proc.onData(data => {
+    output += data;
+    if (!sent && output.includes("选择（0 返回）")) { sent = true; proc.write("0\r"); }
+  });
+  const result = await exit;
+  clearTimeout(timeout);
+  assert.equal(result.exitCode, 0, output);
+  assert.match(output, /接回运行中的 Pi/);
+  assert(!output.includes("groff-pic-sentinel"));
+  assert.equal(await fs.readFile(groff, "utf8"), original);
+  assert.equal((await fs.stat(groff)).mode & 0o777, originalMode);
+  assert.deepEqual(await f.calls(), []);
+});
+test("pi-container menu owns hosted processes, not native Pi conversation commands", async (t) => {
   const f = await fixture(t);
   const r = await f.menu("8\r0\r");
   assert.equal(r.exitCode, 0);
@@ -453,7 +495,7 @@ test("removed control plane has no menu, dispatcher, dependencies or socket moun
   }
   for (const file of ["web", "lib/web.sh", "config/nginx-pic.conf"])
     await assert.rejects(fs.access(path.join(repo, file)));
-  for (const file of ["bin/pic", "scripts/control.sh", "Dockerfile", "compose.yaml", "compose.deploy.yaml", "compose.services.yaml", "package.json", ".npmrc", "scripts/check.sh", ".github/workflows/ci.yml"]) {
+  for (const file of ["bin/pi-container", "scripts/control.sh", "Dockerfile", "compose.yaml", "compose.deploy.yaml", "compose.services.yaml", "package.json", ".npmrc", "scripts/check.sh", ".github/workflows/ci.yml"]) {
     const text = await fs.readFile(path.join(repo, file), "utf8");
     assert.doesNotMatch(text, /pic-web|web-start|web\/|18090|docker\.sock|@xterm|@lydell\/node-pty|playwright/);
   }
