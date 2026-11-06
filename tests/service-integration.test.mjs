@@ -236,7 +236,12 @@ nginx -s reload -c /opt/app-services/nginx.conf
   await fs.writeFile(proof, 'restored');
   assert.equal(await fs.readFile(path.join(root, 'srv/app-services/ssh/ssh_host_ed25519_key.pub'), 'utf8'), originalHostKey);
   assert.ok(Number(await fs.readFile(starts, 'utf8')) >= 3);
-  client("ssh app-services \"set -eu; sudo sed -i 's/^autostart=true/autostart=false/' /srv/app-services/supervisor/demo.conf; sudo supervisorctl reread; sudo supervisorctl update demo; sudo mv /srv/app-services/nginx/demo.conf /srv/app-services/nginx/demo.disabled; sudo nginx -t -c /opt/app-services/nginx.conf && sudo nginx -s reload -c /opt/app-services/nginx.conf\"");
+  const policy = client("ssh app-services 'sudo deploy-apps list'").trim().split('\t');
+  assert.deepEqual(policy.slice(0, 2), ['demo', 'true']);
+  const runningBeforePolicy = client("ssh app-services 'sudo supervisorctl pid demo'").trim();
+  client(`ssh app-services 'sudo deploy-apps set demo false ${policy[2]}'`);
+  assert.equal(client("ssh app-services 'sudo supervisorctl pid demo'").trim(), runningBeforePolicy, 'policy edit never restarts the current app');
+  client("ssh app-services 'set -eu; sudo supervisorctl stop demo; sudo mv /srv/app-services/nginx/demo.conf /srv/app-services/nginx/demo.disabled; sudo nginx -t -c /opt/app-services/nginx.conf && sudo nginx -s reload -c /opt/app-services/nginx.conf'");
   await stop(); await start();
   const stopped = clientRun("ssh app-services 'sudo supervisorctl status demo'");
   assert.equal(stopped.status, 3, 'supervisorctl reports stopped programs with exit code 3');
@@ -247,7 +252,13 @@ nginx -s reload -c /opt/app-services/nginx.conf
   client("ssh app-services 'sudo supervisorctl status sshd nginx'");
   await stop(); await start();
   assert.equal(await fs.readFile(starts, 'utf8'), stoppedStarts, 'disabled application must not restart');
-  client("ssh app-services 'set -eu; sudo rm /srv/app-services/supervisor/demo.conf; sudo supervisorctl reread; sudo supervisorctl update; sudo rm /srv/app-services/nginx/demo.disabled /srv/app-services/setup.d/10-demo.sh; sudo rm -rf /srv/app-services/apps/demo; sudo userdel app-demo; if getent group app-demo >/dev/null; then sudo groupdel app-demo; fi'");
+  const disabledPolicy = client("ssh app-services 'sudo deploy-apps list'").trim().split('\t');
+  client(`ssh app-services 'sudo deploy-apps set demo true ${disabledPolicy[2]}'`);
+  assert.equal(clientRun("ssh app-services 'sudo supervisorctl status demo'").status, 3, 'policy enable does not start now');
+  await stop(); await start();
+  for (let i = 0; i < 50 && await fs.readFile(starts, 'utf8') === stoppedStarts; i++) await delay(100);
+  assert(Number(await fs.readFile(starts, 'utf8')) > Number(stoppedStarts), 'enabled policy restores on next startup');
+  client("ssh app-services 'set -eu; sudo supervisorctl stop demo; sudo rm /srv/app-services/supervisor/demo.conf; sudo supervisorctl reread; sudo supervisorctl update; sudo rm /srv/app-services/nginx/demo.disabled /srv/app-services/setup.d/10-demo.sh; sudo rm -rf /srv/app-services/apps/demo; sudo userdel app-demo; if getent group app-demo >/dev/null; then sudo groupdel app-demo; fi'");
   await assert.rejects(fs.access(path.join(root, 'srv/app-services/apps/demo')), { code: 'ENOENT' });
   assert.equal(client("ssh app-services 'printf connected'").trim(), 'connected');
   assert.ok((await fs.stat(authorized)).isFile());

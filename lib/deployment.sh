@@ -53,8 +53,11 @@ deployment_require_config() {
         printf 'DEPLOY_PORT 须为 1024–65535。\n' >&2
         return 1
     fi
-    # Explicit host-side creation; Compose must not silently create a root-owned
-    # bind source. Do not change ownership/modes of an existing service tree.
+}
+
+deployment_prepare_data() {
+    # Explicit host-side creation only for start/recreate, never status or app policy reads.
+    # Compose must not silently create a root-owned bind source.
     (umask 077; mkdir -p -- "$DEPLOY_DATA_DIR") || return
     [[ -d "$DEPLOY_DATA_DIR" ]] || return 1
 }
@@ -62,6 +65,7 @@ deployment_require_config() {
 provision_deployment() {
     local credentials host_key
     deployment_require_config || return
+    deployment_prepare_data || return
     umask 077
     credentials="$REPO/.deploy-keys/installation"
     mkdir -p -- "$credentials"

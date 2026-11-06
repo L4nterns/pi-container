@@ -77,7 +77,7 @@ test('smoke Docker orchestration needs no host runtime and retains source-indepe
   assert.equal(result.hostRuntimeCalls, '');
   assert.ok(result.calls.some(a => a.includes('deploy-register')));
   const services = result.calls.filter(a => a[0] === 'run' && a.includes('--network-alias'));
-  assert.equal(services.length, 3, 'initial service and two recreations');
+  assert.equal(services.length, 4, 'initial service, environment recovery, disabled policy and re-enabled policy recreations');
   assert.ok(services.every(a => !a.includes('no-new-privileges:true')), 'sudo-enabled service must not have NNP');
   assert.ok(result.calls.some(a => a.includes('--service-shell') && a.includes('-c') && a.includes('sudo supervisorctl restart demo')));
   assert.ok(result.calls.some(a => a.includes('--service-shell') && a.includes('-s')), 'recovery assertion runs as deploy over normal SSH, not docker exec root');

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Private operation dispatcher for the terminal menu.
-# Not a public CLI; bin/pi-container is the only user-facing command.
+# Not a public CLI; pc and pi-container both open bin/pi-container.
 set -euo pipefail
 SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
 REPO=$(cd -- "$(dirname -- "$SCRIPT")/.." && pwd -P)
@@ -76,7 +76,20 @@ case "$action" in
         fi; exit 0 ;;
     dev-state)
         (( $# == 0 )) || invalid
-        "${CURRENT[@]}" ps -a --format json; exit 0 ;;
+        "${CURRENT[@]}" ps -a --format json
+        printf '\n源码：'; git -C "$REPO" describe --always --dirty 2>/dev/null || printf '未知（不含 Git 信息）\n'
+        built=$(docker image inspect --format '{{.Id}}' "$PIC_IMAGE" 2>/dev/null) || built=''
+        printf '已构建镜像：%s\n' "${built:-未知或尚未构建}"
+        cid=$("${CURRENT[@]}" ps -q pi)
+        if [[ -n "$cid" ]]; then
+            current=$(docker inspect --format '{{.Image}}' "$cid")
+            printf '当前容器镜像：%s\n' "$current"
+            if [[ -n "$built" && "$current" == "$built" ]]; then printf '镜像一致：是\n'; else printf '镜像一致：否或未确认（不会自动重建）\n'; fi
+            printf '容器 Pi：'; docker exec --user "$PIC_UID:$PIC_GID" "$cid" pi --version || printf '未确认\n'
+            printf 'Gateway 默认 Git 安装提交：'
+            docker exec --user "$PIC_UID:$PIC_GID" "$cid" git -C /home/node/.pi/agent/git/github.com/L4nterns/pi-provider-gateway rev-parse --short HEAD 2>/dev/null || printf '未确认（其他安装来源请用原生 pi list 查看）\n'
+        else printf '当前容器未运行；未启动容器查询版本。\n'; fi
+        printf '源码、镜像与持久化插件独立更新；这些查询不会执行更新。\n'; exit 0 ;;
     pi-running|pi-end)
         if [[ "$action" == pi-end ]]; then
             if (( $# != 1 )) || [[ ! "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ ]]; then invalid; fi
@@ -104,12 +117,17 @@ case "$action" in
         exit 0 ;;
     dev-build|dev-rebuild)
         build_flags=(); [[ "$action" != dev-rebuild ]] || build_flags+=(--no-cache)
-        "${CURRENT[@]}" build "${build_flags[@]}" "$@" pi; exit 0 ;;
+        "${CURRENT[@]}" build "${build_flags[@]}" "$@" pi
+        printf '镜像构建完成；现有容器仍使用原镜像。请在任务结束后选择「重建容器」应用镜像；不会自动重启 Pi 或更新持久化插件。\n'
+        exit 0 ;;
     pi-start|pi-connect)
         if (( $# > 1 )) || { (( $# == 1 )) && [[ ! "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ ]]; }; then invalid; fi
         if [[ "$action" == pi-connect && $# != 1 ]]; then invalid; fi ;;
     dev-recreate) (( $# == 0 )) || invalid ;;
     dev-shell|service-shell) ;;
+    service-app-list) (( $# == 0 )) || invalid ;;
+    service-app-set)
+        if (( $# != 3 )) || [[ ! "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ || ! "$2" =~ ^(true|false)$ || ! "$3" =~ ^[0-9a-f]{64}$ ]]; then invalid; fi ;;
     service-start|service-stop|service-remove|service-state|service-logs|service-build|service-recreate) (( $# == 0 )) || invalid ;;
     *) invalid ;;
 esac
@@ -140,13 +158,25 @@ fi
 if [[ "$action" == service-* ]]; then
     deployment_require_config; exec {services_fd}>>"$REPO/.services.lock"; flock -x "$services_fd"
     case "$action" in
-        service-start) "${SERVICE_COMPOSE[@]}" up -d --wait --no-recreate services ;;
+        service-start) deployment_prepare_data; "${SERVICE_COMPOSE[@]}" up -d --wait --no-recreate services ;;
         service-stop) "${SERVICE_COMPOSE[@]}" stop services ;;
         service-remove) "${SERVICE_COMPOSE[@]}" down --remove-orphans ;;
-        service-state) "${SERVICE_COMPOSE[@]}" ps ;;
+        service-state)
+            "${SERVICE_COMPOSE[@]}" ps
+            printf '服务重启策略：unless-stopped（默认随 Docker 恢复；手动停止后需手动启动）。\n应用默认自启动；已有 autostart=false 保持不变。\n'
+            cid=$("${SERVICE_COMPOSE[@]}" ps -q services)
+            if [[ -n "$cid" ]]; then
+                docker inspect --format '当前实际重启策略：{{.HostConfig.RestartPolicy.Name}}' "$cid"
+            else printf '服务容器未运行；未自动启动。\n'; fi ;;
         service-logs) "${SERVICE_COMPOSE[@]}" logs --tail 200 services ;;
         service-build) "${SERVICE_COMPOSE[@]}" build services ;;
-        service-recreate) "${SERVICE_COMPOSE[@]}" up -d --wait --force-recreate --no-build services ;;
+        service-recreate) deployment_prepare_data; "${SERVICE_COMPOSE[@]}" up -d --wait --force-recreate --no-build services ;;
+        service-app-list|service-app-set)
+            cid=$("${SERVICE_COMPOSE[@]}" ps -q services)
+            [[ -n "$cid" ]] || { printf '服务容器未运行；请先选择「启动容器」。未自动启动或修改应用。\n' >&2; exit 1; }
+            if [[ "$action" == service-app-list ]]; then
+                docker exec --user 0 "$cid" /usr/local/bin/deploy-apps list
+            else docker exec --user 0 "$cid" /usr/local/bin/deploy-apps set "$@"; fi ;;
     esac; exit 0
 fi
 deployment_require_workspace

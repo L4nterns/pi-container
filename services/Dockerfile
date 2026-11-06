@@ -10,7 +10,8 @@ RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
 ENV LANG=C.UTF-8
 COPY services/ /opt/app-services/
 COPY LICENSE /opt/app-services/LICENSE
-RUN chmod 0755 /opt/app-services/entrypoint.sh /opt/app-services/healthcheck.sh /opt/app-services/register-key.py \
+RUN chmod 0755 /opt/app-services/entrypoint.sh /opt/app-services/healthcheck.sh /opt/app-services/register-key.py /opt/app-services/app-control.py \
+    && ln -s /opt/app-services/app-control.py /usr/local/bin/deploy-apps \
     && ln -s /opt/app-services/register-key.py /usr/local/bin/deploy-register \
     && ln -sf /opt/app-services/supervisord.conf /etc/supervisor/supervisord.conf
 # The SSH administrator has explicit container-root capability through sudo.

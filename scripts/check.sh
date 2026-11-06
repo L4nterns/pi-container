@@ -12,6 +12,7 @@ for directory in ('services', 'skills', 'tests/fixtures'):
     for filename in Path(directory).rglob('*.py'):
         ast.parse(filename.read_text(), filename=str(filename))
 PY
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/fixtures -p 'test_*.py'
 else
     printf 'Python 3 未安装；跳过语法检查（CI 与服务镜像内执行）。\n' >&2
 fi

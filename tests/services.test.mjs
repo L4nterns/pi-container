@@ -47,6 +47,20 @@ test('service image suppresses package auto-start before installation and replac
   assert.match(image, /ln -sf \/opt\/app-services\/supervisord\.conf \/etc\/supervisor\/supervisord\.conf/);
 });
 
+test('service recovery policy and deployment skill agree with native Supervisor defaults', async () => {
+  const compose = await fs.readFile(path.join(repo, 'compose.services.yaml'), 'utf8');
+  assert.match(compose, /restart: unless-stopped/);
+  const example = await fs.readFile(path.join(repo, 'skills/app-deployment/examples/python/supervisor.conf'), 'utf8');
+  assert.match(example, /^autostart=true$/m); assert.match(example, /^autorestart=true$/m);
+  const skill = await fs.readFile(path.join(repo, 'skills/app-deployment/SKILL.md'), 'utf8');
+  for (const text of ['autostart=true', 'autorestart=true', 'preserve an existing disabled policy', 'next service/Supervisor startup', 'deploy-apps', 'never run the application as root', 'Docker socket', 'zero downtime']) {
+    assert(skill.toLowerCase().includes(text.toLowerCase()), text);
+  }
+  const helper = await fs.readFile(path.join(repo, 'services/app-control.py'), 'utf8');
+  assert.doesNotMatch(helper, /subprocess|os\.system|supervisorctl|command=.*shell/);
+  assert.match(helper, /os\.O_NOFOLLOW/); assert.match(helper, /os\.replace/); assert.match(helper, /sha256/);
+});
+
 test('host gateway template uses DNS label limits and has no application protocol headers', async () => {
   const config = await fs.readFile(path.join(repo, 'config/nginx-apps.conf'), 'utf8');
   assert.doesNotMatch(config, /X-App-Route/);

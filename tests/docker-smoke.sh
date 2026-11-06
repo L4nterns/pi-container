@@ -248,9 +248,13 @@ standalone -s < "$REPO/tests/fixtures/check-service-recovery.sh"
 [[ "$(docker exec "$SERVICE" cat /srv/app-services/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f1-2)" == "$HOST_KEY" ]]
 standalone -c 'sudo -n bash -s' <<'DISABLE'
 set -euo pipefail
-sed -i 's/^autostart=true/autostart=false/' /srv/app-services/supervisor/demo.conf
-supervisorctl reread
-supervisorctl update demo
+before=$(supervisorctl pid demo)
+read -r name enabled revision < <(deploy-apps list)
+[[ "$name" == demo && "$enabled" == true ]]
+deploy-apps set demo false "$revision"
+[[ "$(supervisorctl pid demo)" == "$before" ]]
+# Policy edits never stop/restart a currently running app. Stop is explicit.
+supervisorctl stop demo
 mv /srv/app-services/nginx/demo.conf /srv/app-services/nginx/demo.disabled
 nginx -t -c /opt/app-services/nginx.conf
 nginx -s reload -c /opt/app-services/nginx.conf
@@ -266,9 +270,26 @@ for host in app-demo.example.com app-missing.example.com; do
     code=$(docker exec "$SERVICE" curl -sS --max-time 2 -o /dev/null -w '%{http_code}' -H "Host: $host" http://127.0.0.1:8080/)
     [[ "$code" == 404 ]] || { printf 'Expected 404, got %s\n' "$code" >&2; exit 1; }
 done
+# Re-enable policy without starting now, then prove the next fresh container starts it.
+standalone -c 'sudo -n bash -s' <<'ENABLE'
+set -euo pipefail
+read -r name enabled revision < <(deploy-apps list)
+[[ "$name" == demo && "$enabled" == false ]]
+deploy-apps set demo true "$revision"
+status=$(supervisorctl status demo) || test "$?" = 3
+[[ "$status" == *STOPPED* ]]
+ENABLE
+docker rm -f "$SERVICE" >/dev/null
+start_service
+for attempt in {1..60}; do
+    if docker exec "$SERVICE" curl -fsS --max-time 1 http://127.0.0.1:20000/ >/dev/null; then break; fi
+    sleep .2
+done
+docker exec "$SERVICE" curl -fsS --max-time 1 http://127.0.0.1:20000/ >/dev/null
 # Explicit test authorization: delete only this isolated fixture application.
 standalone -c 'sudo -n bash -s' <<'REMOTE'
 set -euo pipefail
+supervisorctl stop demo
 rm /srv/app-services/supervisor/demo.conf
 supervisorctl reread
 supervisorctl update
