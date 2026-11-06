@@ -1,5 +1,5 @@
 {
   "packages": [
-    { "source": "/opt/pic/packages/pi-provider-gateway", "version": "1.0.0" }
+    { "source": "git:github.com/L4nterns/pi-provider-gateway@25a5686af4791c70c486caff9c1401db1aaf03d9", "version": "25a5686af4791c70c486caff9c1401db1aaf03d9", "name": "pi-provider-gateway" }
   ]
 }

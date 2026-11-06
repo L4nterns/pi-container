@@ -2,6 +2,8 @@
 
 在容器中运行原生 [Pi Coding Agent](https://github.com/earendil-works/pi)，托管仍在输出或执行工具的 Pi 进程，断开终端后再接回同一个进程，并管理开发容器与独立服务容器。宿主无需安装 Node.js 或 Pi。
 
+项目仓库：[L4nterns/pic](https://github.com/L4nterns/pic)。网关插件独立维护于公开仓库 [L4nterns/pi-provider-gateway](https://github.com/L4nterns/pi-provider-gateway)，不随 pic 提交或打包源码。
+
 **宿主入口只记 `pic`，通过菜单管理运行环境和活进程。** 它不是 `pi` 的缩写或参数转发器，不重新包装 Pi 的对话命令，也不提供旧命令兼容入口。本版仅保留终端功能，没有浏览器控制台、管理 HTTP API 或后台管理网站。
 
 | 负责方 | 职责 |
@@ -34,11 +36,19 @@ pic
 
 普通用户将 PATH 配置保存在 Shell 启动文件中。首次打开菜单，先选「开发容器管理 → 构建镜像」，再选「启动并托管 Pi」。构建可逐行填写 `KEY=value` build args，直接回车表示不添加。不要在 build args 中放密码。
 
+## Gateway 在线安装
+
+首次初始化开发环境时，通用引导器按 `config/pi-bootstrap.json` 调用原生 `pi install`，从公开的 [pi-provider-gateway](https://github.com/L4nterns/pi-provider-gateway) 仓库下载插件；**不需要 GitHub token**，pic 仓库、源码包和镜像均不捆绑插件实现。manifest 记录的是经过审查的插件提交，不是 Pi 版本限制。
+
+首次安装需要能访问 GitHub 与 npm；下载失败会明确报错，且不写完成标记，修复网络后可重试。安装存于持久化的 `data/`，成功后引导器不重复安装；同一 source 被用户卸载后也不会每次启动自动装回。更换插件 ref 需要显式更新 manifest 和重建镜像。
+
+已有同名本地包不会被自动替换或再加载一份，不做安装来源迁移。需要改用 Git 安装时，先备份并用 Pi 原生包管理检查旧声明，再自行切换；不要覆盖配置、密钥、模型例外或历史。
+
 进入 Pi 后，使用 `/gateway` 配置 URL / Key，使用 `/model` 和 `/thinking` 选择模型与思考档位。网关扩展独立于 pic，配置和凭据保存在 `data/`。本轮实测的原生 `/login` 会明文回显 secret，网关密钥应走遮罩的 `/gateway login`。
 
 ## Pi 版本与更新
 
-**pic 不固定 Pi 版本。** 依赖跟随 npm 的 `latest` 发布标签；Docker 和开发测试均使用 `npm install --ignore-scripts --package-lock=false`，不交付根锁文件，项目 `.npmrc` 也关闭锁文件生成。独立 Gateway 分发包的版本与此无关。
+**pic 不固定 Pi 版本。** 依赖跟随 npm 的 `latest` 发布标签；Docker 和开发测试均使用 `npm install --ignore-scripts --package-lock=false`，不交付根锁文件，项目 `.npmrc` 也关闭锁文件生成。插件的独立提交引用不限制 Pi 的版本。
 
 Docker 可能复用已有的依赖安装层，不代表每次普通构建都会重新下载。需要获取新 Pi 时，在「开发容器管理」选择「无缓存构建镜像」，再对空闲项目选择「重建当前项目容器」。安装从所选 npm registry 解析 `latest`，不是固定到某个版本号。
 
@@ -115,6 +125,6 @@ npm run check
 bash tests/docker-smoke.sh
 ```
 
-测试中的 PTY 由 util-linux 的 `script` 提供，不记录转录文件，也不需要额外 npm 依赖。真实 tmux 测试需要 `tmux`；缺少条件时明确跳过。验证范围见 [VALIDATION.md](VALIDATION.md)。独立 Gateway 包仍在 `packages/`，不依赖 pic 的命令实现。
+测试中的 PTY 由 util-linux 的 `script` 提供，不记录转录文件，也不需要额外 npm 依赖。真实 tmux 测试需要 `tmux`；缺少条件时明确跳过。验证范围见 [VALIDATION.md](VALIDATION.md)。独立 Gateway 的源码、测试与安装说明见[插件仓库](https://github.com/L4nterns/pi-provider-gateway)，不保存在 pic 中。
 
 [MIT License](LICENSE)。

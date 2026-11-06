@@ -23,8 +23,6 @@ ENV HOME=/home/node
 
 COPY config/pi-bootstrap.json /opt/pic/config/pi-bootstrap.json
 COPY scripts/bootstrap-pi.mjs /opt/pic/scripts/bootstrap-pi.mjs
-# Independent, reviewed Gateway distribution; no provider logic in pic.
-COPY packages/pi-provider-gateway/ /opt/pic/packages/pi-provider-gateway/
 COPY config/tmux.conf /opt/pic/config/tmux.conf
 COPY scripts/pic-session.sh /usr/local/bin/pic-session
 COPY pic-entrypoint.sh /usr/local/bin/pic-entrypoint
