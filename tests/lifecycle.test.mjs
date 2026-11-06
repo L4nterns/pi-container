@@ -79,7 +79,7 @@ test('idle-only maintenance rejects active sessions and works after they leave',
   const script = 'set -euo pipefail; source "$LIBRARY"; session_lifecycle_init "$STATE"; session_require_idle touch "$STATE/maintenance"';
   const blocked = await run(script, state).exited;
   assert.equal(blocked.code, 1);
-  assert.match(blocked.stderr, /活动会话/);
+  assert.match(blocked.stderr, /活动终端连接/);
   active.child.stdin.end('quit\n');
   await active.exited;
   assert.equal((await run(script, state).exited).code, 0);

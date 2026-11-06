@@ -7,19 +7,19 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import './helpers/workspace-access.mjs';
 
-const entrypoint = fileURLToPath(new URL('../dev-entrypoint.sh', import.meta.url));
+const entrypoint = fileURLToPath(new URL('../pic-entrypoint.sh', import.meta.url));
 const ssh = process.env.TEST_SSH_BINARY || '/usr/bin/ssh';
 const hasSsh = await fs.access(ssh).then(() => true, () => false);
 
 test('rejects invalid UID/GID/groups before initialization or running a command', () => {
   const invalid = [
-    { DEV_UID: '' }, { DEV_UID: '0' }, { DEV_UID: '-1' }, { DEV_UID: '1:2' }, { DEV_GID: '' }, { DEV_GID: '0' }, { DEV_GID: '1:2' },
-    { DEV_GROUPS: '0' }, { DEV_GROUPS: '1000,0' }, { DEV_GROUPS: '01000' },
-    { DEV_GROUPS: '' }, { DEV_GROUPS: '0,,1' }, { DEV_GROUPS: ',1' }, { DEV_GROUPS: '1,' }, { DEV_GROUPS: 'abc' },
+    { PIC_UID: '' }, { PIC_UID: '0' }, { PIC_UID: '-1' }, { PIC_UID: '1:2' }, { PIC_GID: '' }, { PIC_GID: '0' }, { PIC_GID: '1:2' },
+    { PIC_GROUPS: '0' }, { PIC_GROUPS: '1000,0' }, { PIC_GROUPS: '01000' },
+    { PIC_GROUPS: '' }, { PIC_GROUPS: '0,,1' }, { PIC_GROUPS: ',1' }, { PIC_GROUPS: '1,' }, { PIC_GROUPS: 'abc' },
   ];
   for (const values of invalid) {
     const result = spawnSync('sh', [entrypoint, '--dev-shell', '-c', 'echo should-not-run'], {
-      encoding: 'utf8', env: { ...process.env, DEV_UID: '1000', DEV_GID: '1000', DEV_GROUPS: '1000', ...values },
+      encoding: 'utf8', env: { ...process.env, PIC_UID: '1000', PIC_GID: '1000', PIC_GROUPS: '1000', ...values },
     });
     assert.equal(result.status, 1, JSON.stringify(values));
     assert.match(result.stderr, /不合法/);
@@ -59,7 +59,7 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
     assert.equal(deps.status, 0, deps.stderr);
     for (const match of deps.stdout.matchAll(/(?:=>\s+|^\s*)(\/\S+)/gm)) await copy(match[1]);
   }
-  await copy(entrypoint, '/usr/bin/dev-entrypoint');
+  await copy(entrypoint, '/usr/bin/pic-entrypoint');
   for (const dir of ['etc', 'dev', 'tmp', 'var/log', 'var/mail', 'home/node/.pi/agent', 'run/deploy-credentials']) {
     await mkdir(path.join(root, dir));
   }
@@ -93,8 +93,8 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
 
   const check = 'printf "%s:%s:%s\\n" "$USER" "$LOGNAME" "$HOME"; id -un; getent passwd "$(id -u)"; ssh -F /etc/ssh_config -T -G app-services';
   for (const [uid, gid] of [[12345, 12345], [12345, 12345], [34567, 23456], [1000, 1000]]) {
-    const result = run(['/usr/bin/setpriv', '--no-new-privs', '/bin/sh', '/usr/bin/dev-entrypoint', '--dev-shell', '-ec', check], {
-      DEV_UID: String(uid), DEV_GID: String(gid), DEV_GROUPS: String(gid),
+    const result = run(['/usr/bin/setpriv', '--no-new-privs', '/bin/sh', '/usr/bin/pic-entrypoint', '--dev-shell', '-ec', check], {
+      PIC_UID: String(uid), PIC_GID: String(gid), PIC_GROUPS: String(gid),
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^node:node:\/home\/node\nnode\n/);
@@ -109,7 +109,7 @@ test('entrypoint registers non-default UID/GID for real OpenSSH and reuses exist
     assert.equal(agent.gid, gid);
     for (const name of ['id_ed25519', 'known_hosts']) {
       const original = path.join(root, 'run/deploy-credentials', name);
-      const staged = path.join(root, 'run/devctl-ssh', name);
+      const staged = path.join(root, 'run/pic-ssh', name);
       assert.equal((await fs.stat(original)).uid, 0);
       assert.equal((await fs.stat(original)).mode & 0o777, 0o600);
       assert.equal((await fs.stat(staged)).uid, uid);

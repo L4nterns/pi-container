@@ -24,7 +24,7 @@ test('real Debian SSH/SFTP, sudo, non-Node application, supervision and persiste
     await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(port, '127.0.0.1', resolve); });
     await new Promise(resolve => probe.close(resolve));
   }
-  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'devctl-ssh-service-'));
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'pic-ssh-service-'));
   const root = path.join(parent, 'root');
   const copied = spawnSync('cp', ['-a', base, root], { encoding: 'utf8' });
   assert.equal(copied.status, 0, copied.stderr);
@@ -62,8 +62,8 @@ test('real Debian SSH/SFTP, sudo, non-Node application, supervision and persiste
   const assembly = dockerfile.replace(/\\\n/g, '').split('\n').filter(line => line.startsWith('RUN ')).at(-1).slice(4);
   ok(['/bin/sh', '-ec', assembly]);
   assert.equal(await fs.readlink(path.join(root, 'etc/supervisor/supervisord.conf')), '/opt/app-services/supervisord.conf');
-  await fs.copyFile(path.join(repo, 'dev-entrypoint.sh'), path.join(root, 'usr/local/bin/dev-entrypoint'));
-  await fs.chmod(path.join(root, 'usr/local/bin/dev-entrypoint'), 0o755);
+  await fs.copyFile(path.join(repo, 'pic-entrypoint.sh'), path.join(root, 'usr/local/bin/pic-entrypoint'));
+  await fs.chmod(path.join(root, 'usr/local/bin/pic-entrypoint'), 0o755);
   const sshConfig = path.join(root, 'etc/ssh/ssh_config.d/50-app-services.conf');
   await fs.copyFile(path.join(repo, 'config/ssh-app-services.conf'), sshConfig);
   await fs.chown(sshConfig, 0, 0);
@@ -101,21 +101,21 @@ test('real Debian SSH/SFTP, sudo, non-Node application, supervision and persiste
   assert.equal(await fs.readFile(authorized, 'utf8'), before);
   await fs.writeFile(path.join(credentials, 'known_hosts'), '[app-services]:2222 ' + hostKey + '\n', { mode: 0o600 });
   ok(['chmod', '0700', '/run/deploy-credentials']);
-  const clientRun = script => run(['/usr/local/bin/dev-entrypoint', '--dev-shell', '-ec', script], { env: { ...env, DEV_UID: '12345', DEV_GID: '12345', DEV_GROUPS: '12345' } });
+  const clientRun = script => run(['/usr/local/bin/pic-entrypoint', '--dev-shell', '-ec', script], { env: { ...env, PIC_UID: '12345', PIC_GID: '12345', PIC_GROUPS: '12345' } });
   const client = script => { const result = clientRun(script); assert.equal(result.status, 0, result.stderr || result.stdout); return result.stdout; };
   assert.equal(client("ssh app-services 'id -u; sudo -n id -u'").trim(), '19000\n0');
   assert.equal(client("ssh app-services 'printf normal-command'").trim(), 'normal-command');
   assert.equal((await fs.stat(path.join(credentials, 'id_ed25519'))).uid, 0);
   assert.equal((await fs.stat(path.join(credentials, 'id_ed25519'))).mode & 0o777, 0o600);
-  assert.equal((await fs.stat(path.join(root, 'run/devctl-ssh/id_ed25519'))).uid, 12345);
+  assert.equal((await fs.stat(path.join(root, 'run/pic-ssh/id_ed25519'))).uid, 12345);
   assert.equal(clientRun("ssh app-services 'exit 37'").status, 37);
   // Run the same Bash contract through both real entrypoint modes. SSH must
   // preserve argument boundaries rather than interpreting them a second time.
   const values = ['', 'two words', "single'quote", '"double"', '$HOME; $(exit 99) `exit 98` * \\', 'line\nbreak', '中文'];
   const checkArgs = 'printf "<%s>\\n" "$@"; printf error-output >&2; exit 37';
   for (const mode of ['--dev-shell', '--service-shell']) {
-    const invoke = (args, input) => run(['/usr/local/bin/dev-entrypoint', mode, ...args], {
-      input, env: { ...env, DEV_UID: '12345', DEV_GID: '12345', DEV_GROUPS: '12345' },
+    const invoke = (args, input) => run(['/usr/local/bin/pic-entrypoint', mode, ...args], {
+      input, env: { ...env, PIC_UID: '12345', PIC_GID: '12345', PIC_GROUPS: '12345' },
     });
     for (const flag of ['-c', '-lc']) {
       const result = invoke([flag, checkArgs, 'argument-zero', ...values]);
@@ -161,7 +161,7 @@ supervisorctl update demo
 nginx -t -c /opt/app-services/nginx.conf
 nginx -s reload -c /opt/app-services/nginx.conf
 `;
-  const installed = run(['/usr/local/bin/dev-entrypoint', '--dev-shell', '-ec', "ssh app-services 'sudo -n bash -s'"], { timeout: 90000, input: installScript, env: { ...env, DEV_UID: '12345', DEV_GID: '12345', DEV_GROUPS: '12345' } });
+  const installed = run(['/usr/local/bin/pic-entrypoint', '--dev-shell', '-ec', "ssh app-services 'sudo -n bash -s'"], { timeout: 90000, input: installScript, env: { ...env, PIC_UID: '12345', PIC_GID: '12345', PIC_GROUPS: '12345' } });
   assert.equal(installed.status, 0, installed.stderr + installed.stdout);
   async function healthy() {
     for (let i = 0; i < 50; i++) {
@@ -204,7 +204,7 @@ nginx -s reload -c /opt/app-services/nginx.conf
   }
   assert.notEqual(Number(client("ssh app-services 'sudo supervisorctl pid demo'").trim()), pid);
   await fs.rm(path.join(root, 'workspace'), { recursive: true });
-  const standalone = run(['/usr/local/bin/dev-entrypoint', '--service-shell', '-c', 'sudo supervisorctl status demo'], { env: { ...env, DEV_UID: '12345', DEV_GID: '12345', DEV_GROUPS: '12345' } });
+  const standalone = run(['/usr/local/bin/pic-entrypoint', '--service-shell', '-c', 'sudo supervisorctl status demo'], { env: { ...env, PIC_UID: '12345', PIC_GID: '12345', PIC_GROUPS: '12345' } });
   assert.equal(standalone.status, 0, standalone.stderr); assert.match(standalone.stdout, /demo\s+(RUNNING|STARTING)/);
   const originalHostKey = await fs.readFile(path.join(root, 'srv/app-services/ssh/ssh_host_ed25519_key.pub'), 'utf8');
   await stop();
@@ -225,8 +225,8 @@ nginx -s reload -c /opt/app-services/nginx.conf
   // Execute the exact same non-root SSH assertion as Docker smoke, not a
   // host-root filesystem read that bypasses the actual permission boundary.
   const recoveryCheck = await fs.readFile(path.join(repo, 'tests/fixtures/check-service-recovery.sh'), 'utf8');
-  const checkRecovery = () => run(['/usr/local/bin/dev-entrypoint', '--service-shell', '-s'], {
-    input: recoveryCheck, env: { ...env, DEV_UID: '12345', DEV_GID: '12345', DEV_GROUPS: '12345' },
+  const checkRecovery = () => run(['/usr/local/bin/pic-entrypoint', '--service-shell', '-s'], {
+    input: recoveryCheck, env: { ...env, PIC_UID: '12345', PIC_GID: '12345', PIC_GROUPS: '12345' },
   });
   const recovered = checkRecovery();
   assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);

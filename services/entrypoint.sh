@@ -36,7 +36,7 @@ fi
 # atomically; failed setup aborts startup instead of running a partial environment.
 for script in "$ROOT"/setup.d/*.sh; do
     [ -e "$script" ] || [ -L "$script" ] || continue
-    [ -f "$script" ] && [ ! -L "$script" ] && [ "$(stat -c %u "$script")" = 0 ] || { echo 'Unsafe setup script' >&2; exit 1; }
+    if [ ! -f "$script" ] || [ -L "$script" ] || [ "$(stat -c %u "$script")" != 0 ]; then echo 'Unsafe setup script' >&2; exit 1; fi
     mode=$(stat -c %a "$script")
     [ "$((0$mode & 022))" = 0 ] || { echo 'Setup script is group/world writable' >&2; exit 1; }
     printf 'Preparing environment: %s\n' "${script##*/}"

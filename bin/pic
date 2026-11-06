@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# The one public command. All user choices are made in menus, never subcommands.
+set -euo pipefail
+SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
+REPO=$(cd -- "$(dirname -- "$SCRIPT")/.." && pwd -P)
+help_text() {
+    printf '%s\n' 'Pi in Container' '用法：pic' \
+        '  接回运行中的 Pi：连接原进程，任务继续。' \
+        '  启动并托管 Pi：容器内启动进程，断开终端后继续运行。' \
+        '  结束运行中的 Pi：停止进程，不删除对话历史。' \
+        '  对话、历史、模型和插件由 Pi 原生功能管理；pic 不转发 Pi 参数。' \
+        '  Shell、开发容器和服务容器管理均在菜单中。' \
+        '断开：Ctrl+B，再按 D；结束：在菜单明确选择结束进程。'
+}
+if (( $# )); then
+    if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then help_text; exit 0; fi
+    printf '不接受子命令。请只输入 pic，在菜单中选择。\n' >&2; exit 2
+fi
+if [[ ! -t 0 || ! -t 1 ]]; then printf 'pic 需要交互终端；请直接在终端运行 pic。\n' >&2; exit 2; fi
+CONTROL="$REPO/scripts/control.sh"
+choose() { local value; read -r -p '选择（0 返回）：' value || return 1; printf '%s' "$value"; }
+confirm() { local value; read -r -p "$1 [y/N]：" value || return 1; [[ "$value" == y || "$value" == Y ]]; }
+run() {
+    local status=0
+    bash "$CONTROL" "$@" || status=$?
+    if (( status )); then printf '\n操作未完成（退出码 %s）；未自动改用其他行为。\n' "$status" >&2; fi
+    read -r -p '按回车返回菜单…' _ || true
+}
+pick_running() {
+    local rows line name attached created choice i=0
+    local -a names=()
+    rows=$(bash "$CONTROL" pi-running) || { printf '运行状态未确认；不会把错误当成没有进程。\n' >&2; return 1; }
+    if [[ -z "$rows" ]]; then printf '当前项目没有运行中的 Pi；可选择「启动并托管 Pi」。历史对话由 Pi 内的 /resume 管理。\n' >&2; return 1; fi
+    printf '\n运行中的 Pi（仅活进程，不包含历史对话）\n' >&2
+    while IFS=$'\t' read -r name attached created; do
+        if [[ ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ || ! "$attached" =~ ^[0-9]+$ || ! "$created" =~ ^[0-9]+$ ]]; then printf '进程状态格式错误。\n' >&2; return 1; fi
+        names+=("$name"); i=$((i+1))
+        if [[ "$attached" == 0 ]]; then line='后台运行 · 没有终端连接'; else line="运行中 · $attached 个终端连接"; fi
+        printf '  %s) %s — %s\n' "$i" "$name" "$line" >&2
+    done <<< "$rows"
+    choice=$(choose) || return 1
+    [[ "$choice" != 0 ]] || return 1
+    if [[ ! "$choice" =~ ^[1-9][0-9]*$ ]] || (( ${#choice} > 6 || choice > ${#names[@]} )); then printf '编号无效。\n' >&2; return 1; fi
+    printf '%s' "${names[choice-1]}"
+}
+build_menu() {
+    local action=$1 arg
+    local -a args=()
+    printf '可选 Build args，每行 KEY=value；直接回车开始。不要输入密码。\n'
+    while read -r -p 'Build arg：' arg && [[ -n "$arg" ]]; do
+        if [[ ! "$arg" =~ ^[A-Za-z_][A-Za-z0-9_]*= || "$arg" =~ [[:cntrl:]] ]]; then printf '格式错误，请重试。\n'; continue; fi
+        args+=(--build-arg "$arg")
+    done
+    run "$action" "${args[@]}"
+}
+container_menu() {
+    local choice
+    while true; do
+        printf '\n开发容器管理\n  1) 当前项目容器状态\n  2) 构建镜像\n  3) 无缓存构建镜像\n  4) 停止当前项目容器\n  5) 重建当前项目容器\n  6) 删除当前项目容器（保留数据）\n  7) 查看全部开发容器\n  8) 删除全部空闲开发容器（保留数据）\n'
+        choice=$(choose) || return 0
+        case "$choice" in
+            0) return ;;
+            1) run dev-state ;;
+            2) build_menu dev-build ;;
+            3) build_menu dev-rebuild ;;
+            4) if confirm '停止容器？有运行中的 Pi 或终端连接时会拒绝'; then run dev-stop; fi ;;
+            5) if confirm '重建容器？有运行中的 Pi 或终端连接时会拒绝'; then run dev-recreate; fi ;;
+            6) if confirm '删除当前项目容器？项目文件与历史对话不删除'; then run dev-remove; fi ;;
+            7) run dev-list ;;
+            8) if confirm '删除本安装全部空闲开发容器？保留数据'; then run dev-remove-all; fi ;;
+            *) printf '请选择菜单中的编号。\n' ;;
+        esac
+    done
+}
+service_menu() {
+    local choice
+    while true; do
+        printf '\n独立服务容器\n  1) SSH 管理终端\n  2) 状态\n  3) 启动\n  4) 日志\n  5) 构建镜像\n  6) 停止（中断应用）\n  7) 重建（中断应用）\n  8) 删除容器（保留业务数据）\n'
+        choice=$(choose) || return 0
+        case "$choice" in
+            0) return ;;
+            1) run service-shell ;;
+            2) run service-state ;;
+            3) run service-start ;;
+            4) run service-logs ;;
+            5) run service-build ;;
+            6) if confirm '停止服务容器并中断应用？'; then run service-stop; fi ;;
+            7) if confirm '重建服务容器并中断应用？'; then run service-recreate; fi ;;
+            8) if confirm '删除服务容器？不会删除业务持久数据'; then run service-remove; fi ;;
+            *) printf '请选择菜单中的编号。\n' ;;
+        esac
+    done
+}
+while true; do
+    printf '\nPi in Container\n项目：%s\n\n  1) 接回运行中的 Pi       同一进程，继续查看输出和操作\n  2) 启动并托管 Pi         断开终端后继续运行\n  3) 结束运行中的 Pi       停止进程，不删除对话历史\n  4) 开发 Shell\n  5) 开发容器管理\n  6) 服务容器管理\n  0) 退出菜单              运行中的 Pi 继续\n' "$(pwd -P)"
+    choice=$(choose) || exit 0
+    case "$choice" in
+        0) exit 0 ;;
+        1) if name=$(pick_running); then run pi-connect "$name"; fi ;;
+        2) run pi-start ;;
+        3) if name=$(pick_running) && confirm "结束进程 $name？正在运行的请求和工具可能被中断，历史保留"; then run pi-end "$name"; fi ;;
+        4) run dev-shell ;;
+        5) container_menu ;;
+        6) service_menu ;;
+        *) printf '请选择菜单中的编号。\n' ;;
+    esac
+done

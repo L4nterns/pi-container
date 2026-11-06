@@ -19,9 +19,9 @@ jobs:
       - name: Install ShellCheck, Python and OpenSSH for real-tool regressions
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck python3 openssh-client
-      - name: Install pinned test dependencies
-        run: npm ci --ignore-scripts
+          sudo apt-get install -y shellcheck python3 openssh-client tmux util-linux
+      - name: Install latest Pi for tests
+        run: npm install --ignore-scripts --package-lock=false
       - name: Check scripts and run isolated tests
         run: bash scripts/check.sh
       - name: Test entrypoint identity in a disposable root filesystem

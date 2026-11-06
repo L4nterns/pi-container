@@ -14,7 +14,7 @@ test('root workspace ACLs preserve ownership, allow non-root edits and Git, neve
 }, async t => {
   const previousUmask = process.umask(0o077);
   t.after(() => process.umask(previousUmask));
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'devctl-workspace-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pic-workspace-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.chmod(root, 0o755);
   async function mkdir(directory) {
@@ -37,7 +37,7 @@ test('root workspace ACLs preserve ownership, allow non-root edits and Git, neve
     assert.equal(dependencies.status, 0, dependencies.stderr);
     for (const match of dependencies.stdout.matchAll(/(?:=>\s+|^\s*)(\/\S+)/gm)) await copy(match[1]);
   }
-  await copy(script, '/usr/bin/dev-workspace-init');
+  await copy(script, '/usr/bin/pic-workspace-init');
   for (const directory of ['etc', 'workspace', 'tmp', 'empty-templates', 'dev']) await mkdir(path.join(root, directory));
   await fs.writeFile(path.join(root, 'etc/passwd'), 'root:x:0:0::/root:/bin/sh\nnode:x:12345:12345::/tmp:/bin/sh\n');
   await fs.writeFile(path.join(root, 'etc/group'), 'root:x:0:\nnode:x:12345:\n');
@@ -65,8 +65,8 @@ test('root workspace ACLs preserve ownership, allow non-root edits and Git, neve
   const unsafe = user(['git', '-C', '/workspace', 'status', '--porcelain']);
   assert.notEqual(unsafe.status, 0); assert.match(unsafe.stderr, /dubious ownership/);
   await fs.chmod(workspace, 0o700);
-  for (const uid of ['', '0', '-1', '123:4']) assert.notEqual(run(['sh', '/usr/bin/dev-workspace-init', uid]).status, 0);
-  ok(['sh', '/usr/bin/dev-workspace-init', '12345']);
+  for (const uid of ['', '0', '-1', '123:4']) assert.notEqual(run(['sh', '/usr/bin/pic-workspace-init', uid]).status, 0);
+  ok(['sh', '/usr/bin/pic-workspace-init', '12345']);
   assert.equal((await fs.stat(path.join(root, 'etc/gitconfig'))).mode & 0o777, 0o644);
   const edited = user(['sh', '-ec', 'printf updated > /workspace/private; printf created > /workspace/new; /workspace/executable; git -C /workspace status --porcelain']);
   assert.equal(edited.status, 0, edited.stderr);
@@ -83,7 +83,7 @@ test('root workspace ACLs preserve ownership, allow non-root edits and Git, neve
   // Explicit private creation modes mask inherited ACL access until rescan.
   await fs.mkdir(path.join(workspace, 'new-root-dir'), { mode: 0o700 });
   await fs.writeFile(path.join(workspace, 'new-root-dir/file'), 'later', { mode: 0o600 });
-  ok(['sh', '/usr/bin/dev-workspace-init', '12345']);
+  ok(['sh', '/usr/bin/pic-workspace-init', '12345']);
   assert.equal(user(['sh', '-c', 'printf next > /workspace/new-root-dir/file']).status, 0);
   assert.equal((await fs.stat(path.join(workspace, 'new-root-dir/file'))).uid, 0);
   assert.equal((await fs.stat(outside)).mode & 0o777, 0o600);

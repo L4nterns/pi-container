@@ -1,99 +1,120 @@
-# Pi in Docker
+# Pi in Container · `pic`
 
-在 Docker 中运行 [Pi Coding Agent](https://github.com/earendil-works/pi)，无需在宿主安装 Node.js 或 Pi。`devctl` 是宿主命令：进入项目目录，执行即可开始开发。
+在容器中运行原生 [Pi Coding Agent](https://github.com/earendil-works/pi)，托管仍在输出或执行工具的 Pi 进程，断开终端后再接回同一个进程，并管理开发容器与独立服务容器。宿主无需安装 Node.js 或 Pi。
 
-- 当前项目挂载到容器 `/workspace`，Pi 和开发 Shell 均以非 root 身份运行。
-- 每个项目使用独立开发容器，同一项目可打开多个会话。
-- 各项目共享 Pi 配置、凭据和扩展，会话按项目保存，容器删除后仍可使用。
-- 内置 [NewAPI provider](https://github.com/L4nterns/pi-provider-newapi)；可选独立应用服务容器。
+**宿主入口只记 `pic`，通过菜单管理运行环境和活进程。** 它不是 `pi` 的缩写或参数转发器，不重新包装 Pi 的对话命令，也不提供旧命令兼容入口。本版仅保留终端功能，没有浏览器控制台、管理 HTTP API 或后台管理网站。
 
-## 安装与首次运行
+| 负责方 | 职责 |
+|---|---|
+| 原生 `pi` | 对话、`/new`、`/resume`、`/compact`、模型、思考档位、provider 与插件 |
+| `pic` | 容器生命周期、启动并托管进程、断开后保持运行、重新接回原进程、明确结束进程 |
 
-需要 Linux、Bash 4.1+、Git、GNU coreutils、`flock`，以及有权限使用的本机 Docker Engine / Compose v2（支持 `config --environment`、`up --wait`）。WSL 使用 Linux 环境；不支持原生 PowerShell，未验证 Podman 或远程 Docker。
+截至本轮核对，原生 Pi 的 `pi --resume` / `--continue` 恢复的是磁盘历史，**不是接回一个仍在输出的 TUI 进程**；RPC 也不是附着到既有交互终端的命令。pic 通过容器内 tmux 补上这层进程与终端生命周期管理，不修改 Pi 原生命令。账号、路由、额度仍由上游管理。
 
-以下用于全新安装，先只运行 Pi。已有安装不要覆盖 `.env` 或同名命令。
+## 安装
+
+需要 Linux、Bash 4.1+、GNU coreutils、`flock`，及有权限使用的本机 Docker Engine / Compose v2。部署功能另需 OpenSSH 客户端。不支持远程 Docker、原生 Windows，WSL 请使用 Linux 环境。
+
+以下只用于**全新安装**；已有配置、凭据和业务数据不要覆盖。本仓库提供源码，尚未发布预构建镜像。
 
 ```bash
-git clone https://github.com/L4nterns/pi-docker.git ~/devctl
-cd ~/devctl
+tar --same-permissions -xzf pic-source.tar.gz
+cd pic
 printf 'DEPLOY_DATA_DIR=\n' > .env
 
-if [ "$(id -u)" = 0 ]; then
-    BIN_DIR=/usr/local/bin
-else
-    BIN_DIR="$HOME/.local/bin"
-fi
+if [ "$(id -u)" = 0 ]; then BIN_DIR=/usr/local/bin; else BIN_DIR="$HOME/.local/bin"; fi
 mkdir -p "$BIN_DIR"
-ln -s "$PWD/bin/devctl" "$BIN_DIR/devctl"
+ln -s "$PWD/bin/pic" "$BIN_DIR/pic"
 export PATH="$BIN_DIR:$PATH"
-command -v devctl
 
-mkdir -p ~/projects/my-app
-cd ~/projects/my-app
-devctl
+mkdir -p ~/projects/demo
+cd ~/projects/demo
+pic
 ```
 
-首次运行需要联网构建镜像、安装 provider。使用 NewAPI 时，在 Pi 中依次配置：
+普通用户将 PATH 配置保存在 Shell 启动文件中。首次打开菜单，先选「开发容器管理 → 构建镜像」，再选「启动并托管 Pi」。构建可逐行填写 `KEY=value` build args，直接回车表示不添加。不要在 build args 中放密码。
+
+进入 Pi 后，使用 `/gateway` 配置 URL / Key，使用 `/model` 和 `/thinking` 选择模型与思考档位。网关扩展独立于 pic，配置和凭据保存在 `data/`。本轮实测的原生 `/login` 会明文回显 secret，网关密钥应走遮罩的 `/gateway login`。
+
+## Pi 版本与更新
+
+**pic 不固定 Pi 版本。** 依赖跟随 npm 的 `latest` 发布标签；Docker 和开发测试均使用 `npm install --ignore-scripts --package-lock=false`，不交付根锁文件，项目 `.npmrc` 也关闭锁文件生成。独立 Gateway 分发包的版本与此无关。
+
+Docker 可能复用已有的依赖安装层，不代表每次普通构建都会重新下载。需要获取新 Pi 时，在「开发容器管理」选择「无缓存构建镜像」，再对空闲项目选择「重建当前项目容器」。安装从所选 npm registry 解析 `latest`，不是固定到某个版本号。
+
+已运行的 Pi 不热更新；容器启动时也不自动联网替换 Pi、改写凭据或降级。新版本的兼容性由测试和实际使用确认，不能把本轮验收视作对所有未来版本的保证。
+
+## 菜单：只管理运行环境和活进程
+
+在具体项目目录运行 `pic`：
 
 ```text
-/newapi-provider-add newapi
-/login newapi
-/model
+1) 接回运行中的 Pi       同一进程，继续查看输出和操作
+2) 启动并托管 Pi         断开终端后继续运行
+3) 结束运行中的 Pi       停止进程，不删除对话历史
+4) 开发 Shell
+5) 开发容器管理
+6) 服务容器管理
+0) 退出菜单              运行中的 Pi 继续
 ```
 
-普通用户需将 `export PATH="$HOME/.local/bin:$PATH"` 加入 Shell 启动文件；Bash 通常使用 `~/.bashrc`，登录配置应加载它。宿主原有的 `pi` 不受影响。
+| 概念 | 含义 |
+|---|---|
+| 运行中的 Pi | 容器内仍然活着的进程；没有终端连接时，请求、输出和工具仍可继续执行 |
+| 历史对话 | Pi 保存的磁盘数据，由 Pi 管理；不代表进程还在运行 |
+| 终端连接 | 宿主终端通向进程的一条连接；断开连接不等于结束 Pi |
 
-## 日常使用
+- **接回**只列活进程，显示「后台运行 · 没有终端连接」或连接数。仍在输出时也能接回；不重启 Pi、不读取历史来重放任务、不重新发起模型请求。选错、进程已退出或查询失败时明确报错，不自动启动替代进程。
+- **启动并托管**创建一个容器内 Pi 进程，用原生 TUI 操作它；不传入 `--resume`、`--continue` 或模型设置，不替用户选择历史。一个托管进程中可以使用 Pi 的 `/new` 或 `/resume` 切换对话，进程标识与对话文件不是一回事。
+- **断开**：`Ctrl+B`，松开，再按 `D`，回到菜单；Pi 中正在进行的请求与工具不因终端断开而被主动中断。关闭宿主终端也保留托管进程。
+- **结束**：在菜单选进程并确认；会中断正在进行的请求和工具，不删除历史。
+- 选择 `0` 返回上级或退出。pic 不自动决定接回或另起进程，需要交互终端，不接受管道或 Pi 参数直通。
 
-在需要开发的项目目录运行：
+### 正在输出时，断开再接回
 
-```bash
-devctl                         # 运行 Pi
-devctl shell                   # 进入开发 Bash，不安装 provider
-devctl shell -c 'npm test'      # 执行命令
-devctl shell -s < script.sh     # 从标准输入执行脚本
-```
+1. 在菜单选「启动并托管 Pi」，进入 Pi 后正常提交任务。
+2. 输出或工具仍在进行时，用 `Ctrl+B d` 断开，或关闭宿主 SSH 终端。
+3. 再次登录宿主，进入同一项目，运行 `pic`，选「接回运行中的 Pi」。
+4. 选中原进程，继续查看其当前输出和操作。原进程若仍存活，不应改用 `/resume` 或启动另一个 Pi 来替代接回。
 
-`shell` 接受 Bash 参数，保留输入、输出和退出码；`-lc '命令'` 使用登录 Shell。多个终端可进入同一项目，最后一个会话正常退出后停止开发容器，不删除文件或会话。
+多个终端可连接同一进程并共享输入与显示，不是隔离观察者，请避免同时输入。tmux 保存终端状态和有限滚屏，不是无限日志或任务检查点，也不能修复模型服务本身的断流。
 
-| 命令 | 用途 |
-| --- | --- |
-| `devctl ps` | 查看本安装、当前宿主用户的开发容器 |
-| `devctl stop` | 停止当前项目的空闲容器 |
-| `devctl down [--all]` | 删除当前项目的空闲开发容器；`--all` 覆盖本安装当前用户的全部项目，均保留数据 |
-| `devctl build / rebuild [构建参数...]` | 构建 / 无缓存构建开发镜像 |
-| `devctl recreate` | 用现有镜像重建当前项目的空闲容器 |
+Pi 自己退出、容器 / 宿主重启或进程崩溃后，原执行状态已经消失。此时可启动并托管一个 Pi，再在 **Pi 内用 `/resume`** 选择已保存的历史；这不能复活之前正在执行的请求或工具。直接在开发 Shell 中执行 `pi` 仍是原生命令，但不经过 pic 托管，不承诺断开后继续运行。
 
-有活动会话时拒绝 `stop`、`down` 和 `recreate`。构建镜像不会替换已有容器，需退出会话后执行 `recreate`；长期开发工具应写入 `Dockerfile`，不依赖容器可写层。不要混用原始 `docker exec` 与维护命令。
+停止、删除、重建开发容器会检查终端租约、后台 Pi 和外部 Docker exec；未知状态拒绝维护。最后一个终端离开，不会误停仍有后台 Pi 的容器。
 
-## 文件与权限
+## 远程终端与权限
+
+远程使用时，先通过自己的 SSH 登录宿主，在项目目录运行 `pic`；不额外开放管理网站、管理端口或 Docker API。Docker 操作由宿主当前用户执行，仍要求该用户已有相应权限；取消网页不等于取消宿主 Docker 权限。Pi 与应用容器不挂载 Docker socket，详见 [SECURITY.md](SECURITY.md)。
+
+## 服务与持久数据
+
+开发 Shell 中执行项目命令、脚本、测试；服务容器菜单中的 SSH 终端用于容器内 sudo、发布、SFTP、路由和应用运行时管理。SSH 终端不挂载项目或 Pi 数据、不启动项目开发容器。部署按 [DEPLOYMENT.md](DEPLOYMENT.md) 配置 `DEPLOY_DATA_DIR`。
 
 | 位置 | 内容 |
-| --- | --- |
-| 当前项目目录 | 源码与开发输出，直接读写宿主文件 |
-| 安装目录 `data/` | Pi 配置、凭据、扩展与项目会话 |
-| 安装目录 `.runtime/` | 宿主会话协调状态，不挂入容器 |
+|---|---|
+| 项目目录 | 挂载为 `/workspace` 的开发文件 |
+| `data/` | Pi 配置、凭据、扩展，以及 `project-history/` 下按项目保存的对话 |
+| `.runtime/` | 宿主项目锁、终端连接租约 |
+| `.deploy-keys/`、`services-data/` | 可选部署身份和应用业务数据 |
 
-同一安装固定使用一个宿主身份，项目之间不隔离 Pi 凭据。不要从 `/`、安装目录或包含共享凭据与服务数据的目录启动开发会话。
+删除容器不删除 bind 数据；服务停止和重建会中断应用，不保证零停机。同一安装只使用同一宿主身份。宿主 root 的开发进程映射到 UID 1000，工作区 ACL 修改会保留；同机 UID 1000 也会得到访问权，不是多租户沙箱。
 
-普通用户使用宿主 UID/GID；宿主 root 映射到容器 UID/GID 1000，并为工作区添加**会保留在宿主上的 ACL**，同机 UID 1000 也因此获得访问权。无需在宿主安装 ACL 工具，但文件系统必须支持 POSIX ACL。完整边界见 [SECURITY.md](SECURITY.md)。
+## 无旧版兼容层
 
-## 可选：应用部署
+本版只有 `pic` 菜单，不保留旧命令别名、旧多词入口、旧环境变量、旧镜像路径或迁移标记识别。开发容器使用 `pic-*` 身份，运行时路径 `/opt/pic`；不自动接管旧版容器，也不迁移旧历史目录。
 
-需要让应用独立于 Pi 会话运行时，在安装目录 `.env` 中设置 `DEPLOY_DATA_DIR`。`app-deployment` skill 通过 SSH/SFTP 管理一个共享的 Debian 服务容器；退出或删除开发容器不影响应用。
+这不意味着删除旧数据：源码改动没有清空原配置、凭据、模型例外、历史或业务目录。已有安装应先备份并自行停止旧容器，明确处理已有身份与数据，再安装本版；不要新旧版本同时写同一份持久数据，也不要覆盖现有 `.env`。本次交付和源码推送不表示已更新不可见的宿主安装或发布镜像。
 
-宿主使用 `devctl server [Bash 参数...]` 进入服务端，接受与 `shell` 相同的 Bash 参数。配置、持久化、备份及公网入口见 [DEPLOYMENT.md](DEPLOYMENT.md)，配置项见 [.env.example](.env.example)。部署不是使用 Pi 的前提。
-
-## 开发与检查
-
-修改本仓库需 Node.js 24；完整源码检查另需 Python 3、ShellCheck 和 OpenSSH。
+## 开发与验证
 
 ```bash
-npm ci --ignore-scripts
+npm install --ignore-scripts --package-lock=false
 npm run check
+# 真正 Docker / SSH / tmux 集成，需要本机 Docker
 bash tests/docker-smoke.sh
 ```
 
-Docker smoke 使用隔离临时状态，不读取真实 `.env` 或业务数据，也不验证公网；需要本机 Docker，无需宿主 Node.js。部分真实工具测试需 root 或指定 `TEST_SERVICE_ROOTFS`，条件不足时会跳过。
+测试中的 PTY 由 util-linux 的 `script` 提供，不记录转录文件，也不需要额外 npm 依赖。真实 tmux 测试需要 `tmux`；缺少条件时明确跳过。验证范围见 [VALIDATION.md](VALIDATION.md)。独立 Gateway 包仍在 `packages/`，不依赖 pic 的命令实现。
 
 [MIT License](LICENSE)。

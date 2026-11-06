@@ -5,7 +5,7 @@ description: Configure application environments and deploy, debug, operate or re
 
 # Application deployment and operations
 
-Read `/opt/devctl/DEPLOYMENT.md` before acting. Connect using `ssh app-services`; transfer reviewed artifacts with `sftp app-services` or `scp`. All projects in this installation share management access. Inspect existing applications before choosing names or changing shared dependencies.
+Read `/opt/pic/DEPLOYMENT.md` before acting. Connect using `ssh app-services`; transfer reviewed artifacts with `sftp app-services` or `scp`. All projects in this installation share management access. Inspect existing applications before choosing names or changing shared dependencies.
 
 The service is a Debian environment, not a language-specific deployment platform. Inspect installed tools and install the runtime and system dependencies the application actually requires. Container administration and application execution are different roles: never run the application as root. Never request Docker socket access or modify host services.
 

@@ -10,7 +10,7 @@ import { loadSkills, formatSkillsForPrompt } from '@earendil-works/pi-coding-age
 const repo = fileURLToPath(new URL('..', import.meta.url));
 
 test('deployment skill loads cleanly and advertises metadata, not its full workflow', async t => {
-  const empty = await fs.mkdtemp(path.join(os.tmpdir(), 'devctl-skills-'));
+  const empty = await fs.mkdtemp(path.join(os.tmpdir(), 'pic-skills-'));
   t.after(() => fs.rm(empty, { recursive: true, force: true }));
   const result = loadSkills({ cwd: empty, agentDir: empty, includeDefaults: false, skillPaths: [path.join(repo, 'skills/app-deployment')] });
   assert.deepEqual(result.diagnostics, []);
@@ -19,13 +19,13 @@ test('deployment skill loads cleanly and advertises metadata, not its full workf
   const prompt = formatSkillsForPrompt(result.skills);
   assert.ok(prompt.includes('app-deployment'));
   assert.ok(!prompt.includes('Stopping preserves application data'));
-  const entrypoint = await fs.readFile(path.join(repo, 'dev-entrypoint.sh'), 'utf8');
-  assert.ok(entrypoint.includes('--skill /opt/devctl/skills/app-deployment'));
+  const entrypoint = await fs.readFile(path.join(repo, 'pic-entrypoint.sh'), 'utf8');
+  assert.ok(entrypoint.includes('--skill /opt/pic/skills/app-deployment'));
   assert.ok(!entrypoint.includes('--append-system-prompt'));
 });
 
 test('service health requires exactly two running core processes and an actual default 404', async t => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'devctl-health-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pic-health-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   await fs.writeFile(path.join(root, 'supervisorctl'), '#!/bin/sh\nprintf "%s\\n" "$TEST_STATUS"\nexit "${TEST_STATUS_EXIT:-0}"\n', { mode: 0o755 });
   await fs.writeFile(path.join(root, 'curl'), '#!/bin/sh\nprintf "%s" "${TEST_HTTP:-404}"\nexit "${TEST_CURL_EXIT:-0}"\n', { mode: 0o755 });

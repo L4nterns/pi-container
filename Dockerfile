@@ -8,26 +8,33 @@ ARG NPM_REGISTRY=https://registry.npmjs.org
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        bash ca-certificates curl git ripgrep fd-find util-linux openssh-client passwd acl; \
+        bash ca-certificates curl git ripgrep fd-find util-linux openssh-client passwd acl tmux; \
     rm -rf /var/lib/apt/lists/*
 
 ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
 ENV LANG=C.UTF-8
 ENV INPUTRC=/etc/inputrc
 
-COPY package.json package-lock.json LICENSE /opt/devctl/
+COPY package.json .npmrc LICENSE /opt/pic/
 RUN set -eu; \
-    npm ci --prefix /opt/devctl --omit=dev --ignore-scripts; \
-    ln -s /opt/devctl/node_modules/.bin/pi /usr/local/bin/pi
+    npm install --prefix /opt/pic --omit=dev --ignore-scripts --package-lock=false; \
+    ln -s /opt/pic/node_modules/.bin/pi /usr/local/bin/pi
 ENV HOME=/home/node
 
-COPY dev-entrypoint.sh /usr/local/bin/dev-entrypoint
-COPY lib/workspace-access.sh /usr/local/bin/dev-workspace-init
+COPY config/pi-bootstrap.json /opt/pic/config/pi-bootstrap.json
+COPY scripts/bootstrap-pi.mjs /opt/pic/scripts/bootstrap-pi.mjs
+# Independent, reviewed Gateway distribution; no provider logic in pic.
+COPY packages/pi-provider-gateway/ /opt/pic/packages/pi-provider-gateway/
+COPY config/tmux.conf /opt/pic/config/tmux.conf
+COPY scripts/pic-session.sh /usr/local/bin/pic-session
+COPY pic-entrypoint.sh /usr/local/bin/pic-entrypoint
+COPY lib/workspace-access.sh /usr/local/bin/pic-workspace-init
 COPY config/ssh-app-services.conf /etc/ssh/ssh_config.d/50-app-services.conf
-COPY DEPLOYMENT.md /opt/devctl/
-COPY skills/app-deployment/ /opt/devctl/skills/app-deployment/
+COPY DEPLOYMENT.md SECURITY.md .env.example /opt/pic/
+COPY config/nginx-apps.conf /opt/pic/config/nginx-apps.conf
+COPY skills/app-deployment/ /opt/pic/skills/app-deployment/
 RUN set -eu; \
-    chmod 0755 /usr/local/bin/dev-entrypoint /usr/local/bin/dev-workspace-init; \
+    chmod 0755 /usr/local/bin/pic-entrypoint /usr/local/bin/pic-workspace-init /usr/local/bin/pic-session; \
     printf '%s\n' 'set completion-ignore-case on' >> /etc/inputrc; \
     printf '%s\n' \
       "PS1='\\[\\e[2;90m\\]────────────────────────────────\\[\\e[0m\\]\\n\\[\\e[1;36m\\]\\u@\\h:\\w\\$ \\[\\e[0m\\]'" \

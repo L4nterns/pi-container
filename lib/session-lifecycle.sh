@@ -82,7 +82,7 @@ session_require_idle() {
     remaining=$(session_active_count) || remaining=1
     if [[ "$remaining" != 0 ]]; then
         session_lifecycle_unlock
-        printf '当前项目仍有 %s 个活动会话；请先退出它们再执行此操作。\n' "$remaining" >&2
+        printf '当前项目仍有 %s 个活动终端连接；请先断开它们再执行此操作。\n' "$remaining" >&2
         return 1
     fi
     if "$@"; then

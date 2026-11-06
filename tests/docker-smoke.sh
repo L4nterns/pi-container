@@ -8,7 +8,7 @@ TMP=$(mktemp -d)
 DEV="dev-smoke-$$"
 SERVICE="app-service-smoke-$$"
 NETWORK="deploy-smoke-$$"
-IMAGE="devctl-test:$$"
+IMAGE="pic-test:$$"
 SERVICE_IMAGE="app-services-test:$$"
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
@@ -40,9 +40,9 @@ cp -R "$REPO/skills/app-deployment/examples/python" "$TMP/workspace/reviewed"
 cp "$REPO/tests/fixtures/http-protocols.py" "$TMP/workspace/reviewed/server.py"
 chmod 755 "$TMP" "$TMP/workspace" "$TMP/workspace/reviewed"
 chmod 644 "$TMP/workspace/reviewed/"*
-export DEV_UID=12345 DEV_GID=12345 DEV_GROUPS=12345 DEV_WORKSPACE="$TMP/workspace"
-export DEV_SESSION_DIR=/home/node/.pi/agent/project-sessions/smoke
-export DEV_IMAGE="$IMAGE" DEPLOY_IMAGE="$SERVICE_IMAGE" DEPLOY_NETWORK="$NETWORK"
+export PIC_UID=12345 PIC_GID=12345 PIC_GROUPS=12345 PIC_WORKSPACE="$TMP/workspace"
+export PIC_HISTORY_DIR=/home/node/.pi/agent/project-history/smoke
+export PIC_IMAGE="$IMAGE" DEPLOY_IMAGE="$SERVICE_IMAGE" DEPLOY_NETWORK="$NETWORK"
 export DEPLOY_DATA_DIR="$TMP/services" DEPLOY_PORT=18080 DEPLOY_PUBLIC_URL='https://app-{app}.example.com'
 export DEPLOY_CREDENTIAL_DIR="$TMP/keys"
 cd "$REPO"
@@ -77,10 +77,10 @@ docker run -d --name "$DEV" --init --security-opt no-new-privileges:true --netwo
     --mount "type=bind,source=$TMP/agent,target=/home/node/.pi/agent" \
     --mount "type=bind,source=$TMP/workspace,target=/workspace" \
     --mount "type=bind,source=$TMP/keys,target=/run/deploy-credentials,readonly" \
-    --tmpfs /run/devctl-ssh:rw,noexec,nosuid,nodev,mode=0700 \
-    --env DEV_UID=12345 --env DEV_GID=12345 --env DEV_GROUPS=12345 \
+    --tmpfs /run/pic-ssh:rw,noexec,nosuid,nodev,mode=0700 \
+    --env PIC_UID=12345 --env PIC_GID=12345 --env PIC_GROUPS=12345 \
     --entrypoint sleep "$IMAGE" infinity
-client() { docker exec -i "$DEV" dev-entrypoint --dev-shell -ec "$1"; }
+client() { docker exec -i "$DEV" pic-entrypoint --dev-shell -ec "$1"; }
 # Root-owned project metadata is accessible only after explicit ACL preparation.
 docker exec "$DEV" sh -ec '
     chown 0:0 /workspace; chmod 0700 /workspace
@@ -91,7 +91,7 @@ docker exec "$DEV" sh -ec '
     git -C /workspace/root-project init --quiet
 '
 if client 'cat /workspace/root-only'; then echo 'Root-only workspace unexpectedly readable before initialization' >&2; exit 1; fi
-docker exec "$DEV" /usr/local/bin/dev-workspace-init 12345
+docker exec "$DEV" /usr/local/bin/pic-workspace-init 12345
 # Variables are evaluated by the development shell, not the host.
 # shellcheck disable=SC2016
 client '
@@ -102,7 +102,7 @@ client '
     test "$(stat -c %u /workspace/created-by-developer)" = 12345
     if cat /workspace/external-link; then exit 1; fi
     git -C /workspace/root-project status --porcelain
-    test "$(stat -c %u:%a /run/devctl-ssh/id_ed25519)" = 12345:600
+    test "$(stat -c %u:%a /run/pic-ssh/id_ed25519)" = 12345:600
 '
 docker exec "$DEV" sh -ec '
     test "$(stat -c %u:%g:%a /run/deploy-credentials/id_ed25519)" = 0:0:600
@@ -110,14 +110,25 @@ docker exec "$DEV" sh -ec '
     test "$(stat -c %u /workspace/root-project/.git)" = 0
 '
 # Host-root's fixed runtime identity also works without root or group 0.
-docker exec "$DEV" /usr/local/bin/dev-workspace-init 1000
-docker exec -e DEV_UID=1000 -e DEV_GID=1000 -e DEV_GROUPS=1000 "$DEV" dev-entrypoint --dev-shell -ec '
+docker exec "$DEV" /usr/local/bin/pic-workspace-init 1000
+docker exec -e PIC_UID=1000 -e PIC_GID=1000 -e PIC_GROUPS=1000 "$DEV" pic-entrypoint --dev-shell -ec '
     test "$(id -u):$(id -g):$(id -G)" = 1000:1000:1000
     printf root-session > /workspace/root-only
     test "$(stat -c %u /workspace/root-only)" = 0
     git -C /workspace/root-project status --porcelain
     ssh app-services "test \"\$(id -u)\" = 19000; sudo -n true"
 '
+# Live process lifetime is independent from the docker exec that created it.
+# Only this disposable container's Pi symlink is temporarily replaced.
+docker exec "$DEV" sh -ec 'mv /usr/local/bin/pi /usr/local/bin/pi.original; printf "#!/bin/sh\necho \$\$ > /tmp/live-pi-pid\nexec sleep infinity\n" > /usr/local/bin/pi; chmod 755 /usr/local/bin/pi'
+docker exec "$DEV" pic-entrypoint --pic-session start smoke-live
+count=$(docker exec --user 12345:12345 "$DEV" pic-session count)
+[[ "$count" == 1 ]] || { echo 'Detached Pi did not survive exec exit' >&2; exit 1; }
+first_pid=$(docker exec "$DEV" sh -ec 'for i in 1 2 3 4 5; do test ! -s /tmp/live-pi-pid || { cat /tmp/live-pi-pid; exit 0; }; sleep .1; done; exit 1')
+docker exec "$DEV" sh -ec 'kill -0 "$1"' sh "$first_pid"
+docker exec --user 12345:12345 "$DEV" pic-session close smoke-live
+[[ "$(docker exec --user 12345:12345 "$DEV" pic-session count)" == 0 ]]
+docker exec "$DEV" sh -ec 'rm /usr/local/bin/pi; mv /usr/local/bin/pi.original /usr/local/bin/pi'
 # Variables expand in the remote shell, not the host.
 # shellcheck disable=SC2016
 client '
@@ -135,24 +146,24 @@ client 'ssh app-services "exit 37"' || status=$?
 [[ "$status" == 37 ]] || { printf 'SSH command exit status was not preserved\n' >&2; exit 1; }
 # Identical Bash argument/stdin/exit semantics, over exec and over real SSH.
 for mode in --dev-shell --service-shell; do
-    docker exec -t "$DEV" dev-entrypoint "$mode" -c 'test -t 0 && test -t 1'
+    docker exec -t "$DEV" pic-entrypoint "$mode" -c 'test -t 0 && test -t 1'
     # shellcheck disable=SC2016
-    docker exec -i "$DEV" dev-entrypoint "$mode" -lc \
+    docker exec -i "$DEV" pic-entrypoint "$mode" -lc \
         'test "$#" = 3 && test "$1" = "two words" && test -z "$2" && test "$3" = '\''$HOME;*'\'' && ! test -t 0' \
         bash 'two words' '' '$HOME;*'
     status=0
-    docker exec -i "$DEV" dev-entrypoint "$mode" -s -- 'stdin argument' <<'BASH' || status=$?
+    docker exec -i "$DEV" pic-entrypoint "$mode" -s -- 'stdin argument' <<'BASH' || status=$?
 [[ "$1" == 'stdin argument' ]] || exit 91
 exit 37
 BASH
     [[ "$status" == 37 ]] || { printf 'Bash stdin/exit contract failed: %s\n' "$mode" >&2; exit 1; }
 done
 # Assert actual skill discovery and on-demand instructions without model/API calls.
-docker exec "$DEV" dev-entrypoint --version
-docker exec "$DEV" dev-entrypoint --version
+docker exec "$DEV" pic-entrypoint --version
+docker exec "$DEV" pic-entrypoint --version
 client 'node --input-type=module -e '\''
-import {loadSkills,formatSkillsForPrompt} from "/opt/devctl/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
-const result=loadSkills({cwd:"/workspace",agentDir:"/tmp/skill-check-empty",skillPaths:["/opt/devctl/skills/app-deployment"]});
+import {loadSkills,formatSkillsForPrompt} from "/opt/pic/node_modules/@earendil-works/pi-coding-agent/dist/index.js";
+const result=loadSkills({cwd:"/workspace",agentDir:"/tmp/skill-check-empty",skillPaths:["/opt/pic/skills/app-deployment"]});
 const skill=result.skills.find(s=>s.name==="app-deployment");
 if(!skill||result.diagnostics.some(d=>d.type==="warning"))throw new Error("Skill discovery failed");
 const prompt=formatSkillsForPrompt([skill]);
@@ -219,13 +230,13 @@ wait_app
 # through container root so this also runs on a non-root CI host, then stop it.
 docker exec "$DEV" sh -ec 'rm -rf /workspace/reviewed; test ! -e /workspace/reviewed'
 docker stop "$DEV" >/dev/null
-# Same path as devctl server: no source/Pi bind mount, numeric NSS initialization.
+# Same path as the service-terminal menu: no source/Pi bind, numeric NSS initialization.
 standalone() {
     docker run --rm --init --pull never -i --security-opt no-new-privileges:true --network "$NETWORK" \
-        --tmpfs /run/devctl-ssh:rw,noexec,nosuid,nodev,mode=0700 \
-        --env DEV_UID=12345 --env DEV_GID=12345 --env DEV_GROUPS=12345 \
+        --tmpfs /run/pic-ssh:rw,noexec,nosuid,nodev,mode=0700 \
+        --env PIC_UID=12345 --env PIC_GID=12345 --env PIC_GROUPS=12345 \
         --mount "type=bind,source=$TMP/keys,target=/run/deploy-credentials,readonly" \
-        --entrypoint /usr/local/bin/dev-entrypoint "$IMAGE" --service-shell "$@"
+        --entrypoint /usr/local/bin/pic-entrypoint "$IMAGE" --service-shell "$@"
 }
 standalone -c 'sudo supervisorctl restart demo'
 wait_app

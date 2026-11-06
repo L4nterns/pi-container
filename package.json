@@ -1,5 +1,5 @@
 {
-  "name": "devctl",
+  "name": "pi-in-container",
   "private": true,
   "license": "MIT",
   "scripts": {
@@ -8,6 +8,6 @@
   },
   "engines": { "node": ">=24" },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.5.0"
+    "@earendil-works/pi-coding-agent": "latest"
   }
 }

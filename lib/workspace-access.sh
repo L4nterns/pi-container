@@ -9,12 +9,12 @@ umask 022
 case "${1:-}" in
     ''|*[!0-9]*|0*) echo 'Invalid workspace UID' >&2; exit 1 ;;
 esac
-[ "$#" = 1 ] || { echo 'Usage: dev-workspace-init <uid>' >&2; exit 1; }
+[ "$#" = 1 ] || { echo 'Usage: pic-workspace-init <uid>' >&2; exit 1; }
 uid=$1
-[ -d /workspace ] && [ ! -L /workspace ] || { echo 'Missing workspace directory' >&2; exit 1; }
+if [ ! -d /workspace ] || [ -L /workspace ]; then echo 'Missing workspace directory' >&2; exit 1; fi
 # Physical traversal: never follow repository symlinks into other host files.
 # Defaults allow newly created root-owned files to inherit development access
-# when their creation mode allows it; rescan on every devctl session as well.
+# when their creation mode allows it; rescan on every pic terminal connection as well.
 find /workspace -xdev -type d -uid 0 -exec setfacl -P -m "u:$uid:rwx,d:u:$uid:rwx" -- {} +
 find /workspace -xdev -type f -uid 0 -exec setfacl -P -m "u:$uid:rwX" -- {} +
 # The mounted source is trusted by the host operator, even when root owns .git.

@@ -1,341 +1,482 @@
-import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import fs from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-
-const repo = fileURLToPath(new URL('..', import.meta.url));
-// Public test identity only; no corresponding private key is stored.
-const hostKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZbxB6rD5TGtb2T/JKn4uf6eoWr5j2WT6eOo+CFc4JI';
-const keygen = process.env.TEST_SSH_KEYGEN_BINARY || (process.env.TEST_SSH_BINARY ? path.join(path.dirname(process.env.TEST_SSH_BINARY), 'ssh-keygen') : '/usr/bin/ssh-keygen');
-// CLI tests stub key creation. Where OpenSSH is available, trust validation uses
-// the real parser; otherwise only the command-boundary double is exercised.
-const hasKeygen = await fs.access(keygen).then(() => true, () => false);
-
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { pty } from "./helpers/pty.mjs";
+const repo = fileURLToPath(new URL("..", import.meta.url));
+const hostKey =
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICZbxB6rD5TGtb2T/JKn4uf6eoWr5j2WT6eOo+CFc4JI";
+const keygen = process.env.TEST_SSH_KEYGEN_BINARY || "/usr/bin/ssh-keygen";
+const hasKeygen = await fs.access(keygen).then(
+  () => true,
+  () => false,
+);
 async function fixture(t) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-cli-test-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pic-command-test-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const tool = path.join(root, 'tool');
-  const project = path.join(root, 'project with spaces');
-  const fakeBin = path.join(root, 'fake-bin');
-  const log = path.join(root, 'docker.jsonl');
-  for (const dir of [path.join(tool, 'bin'), path.join(tool, 'lib'), project, fakeBin]) {
-    await fs.mkdir(dir, { recursive: true });
-  }
-  for (const file of ['bin/devctl', 'lib/session-lifecycle.sh', 'lib/deployment.sh', 'compose.yaml', 'compose.deploy.yaml', 'compose.services.yaml', '.env.example']) {
-    await fs.copyFile(path.join(repo, file), path.join(tool, file));
-  }
-  await fs.writeFile(path.join(fakeBin, 'ssh-keygen'), `#!/bin/sh
-if [ "$1" = '-l' ]; then
-    ${hasKeygen ? `exec '${keygen}' "$@"` : `grep -Fq '${hostKey}' "$3"`}
-    exit $?
-fi
-while [ "$1" != '-f' ]; do shift; done
-printf 'test-only-not-a-key' > "$2"
-printf '%s\\n' '${hostKey}' > "$2.pub"
-`, { mode: 0o755 });
-  await fs.writeFile(path.join(fakeBin, 'id'), `#!/bin/sh
-case "$1" in -u) printf '%s\\n' "\${FAKE_UID:-1000}" ;; -g) printf '%s\\n' "\${FAKE_GID:-1000}" ;; -G) printf '%s\\n' "\${FAKE_GROUPS:-1000}" ;; esac
-`, { mode: 0o755 });
-  // No daemon: record invocations at the Docker CLI boundary, not inside the wrapper.
-  await fs.writeFile(path.join(fakeBin, 'docker'), `#!${process.execPath}
-const fs = require('node:fs');
-const args = process.argv.slice(2);
-fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ args, workspace: process.env.DEV_WORKSPACE, uid: process.env.DEV_UID, gid: process.env.DEV_GID, groups: process.env.DEV_GROUPS, session: process.env.DEV_SESSION_DIR, image: process.env.DEV_IMAGE, deployData: process.env.DEPLOY_DATA_DIR }) + '\\n');
-if (args.includes('config') && args.includes('--environment')) {
-  for (const key of ['DEPLOY_DATA_DIR', 'DEPLOY_PUBLIC_URL', 'DEPLOY_PORT']) console.log(key + '=' + (process.env[key] || ''));
-} else if (args.includes('/usr/local/bin/deploy-register')) {
-  console.log(process.env.FAKE_HOST_KEY || ${JSON.stringify(hostKey)});
-} else if (args.includes('up')) {
-  process.exitCode = Number(process.env.FAKE_UP_EXIT || 0);
-} else if (args.includes('/usr/local/bin/dev-workspace-init')) {
-  process.exitCode = Number(process.env.FAKE_WORKSPACE_EXIT || 0);
-} else if (args.includes('ps') && args.includes('-q')) {
-  console.log('fake-container');
-} else if (args[0] === 'inspect') {
-  console.log(process.env.FAKE_EXECS || '0');
-} else if (args[0] === 'run') {
-  process.exitCode = Number(process.env.FAKE_RUN_EXIT || 0);
-} else if (args.includes('exec')) {
-  process.exitCode = Number(process.env.FAKE_EXIT || 0);
-}
-`, { mode: 0o755 });
-  async function run(args = [], env = {}, cwd = project) {
-    const result = spawnSync('bash', [path.join(tool, 'bin/devctl'), ...args], {
-      cwd, encoding: 'utf8', env: {
-        ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_LOG: log,
-        DEPLOY_DATA_DIR: '', DEPLOY_PUBLIC_URL: '', DEPLOY_PORT: '18080', ...env,
-      }, timeout: 10000,
-    });
-    const calls = (await fs.readFile(log, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(x => JSON.parse(x));
-    await fs.writeFile(log, '');
-    return { ...result, calls };
-  }
-  return { tool, root, project, run };
-}
-
-test('help/unknown commands do not invoke Docker or create runtime data', async t => {
-  const { tool, run } = await fixture(t);
-  assert.equal((await run(['--help'])).status, 0);
-  for (const command of ['unknown', 'root-shell', 'ssh', 'apps']) {
-    const bad = await run([command]);
-    assert.equal(bad.status, 2);
-    assert.deepEqual(bad.calls, []);
-  }
-  await assert.rejects(fs.access(path.join(tool, '.runtime')));
-  await assert.rejects(fs.access(path.join(tool, 'data')));
-});
-
-test('command discovery explicitly distinguishes development shell from service SSH', async t => {
-  const { run } = await fixture(t);
-  const help = await run(['--help']);
-  assert.match(help.stdout, /devctl shell.*开发容器/);
-  assert.match(help.stdout, /devctl server \[Bash 参数\.\.\.\].*独立服务容器/);
-  for (const args of [['services'], ['services', 'ssh'], ['services', 'unknown'], ['services', 'up', 'extra']]) {
-    const invalid = await run(args);
-    assert.equal(invalid.status, 2); assert.deepEqual(invalid.calls, []);
-  }
-});
-
-test('forwards Bash args as separate arguments, uses non-TTY exec and stops after exit', async t => {
-  const { project, run } = await fixture(t);
-  const result = await run(['shell', '-c', 'printf "hello world"']);
-  assert.equal(result.status, 0, result.stderr);
-  const exec = result.calls.find(x => x.args.includes('exec'));
-  assert.ok(exec.args.includes('-T'));
-  assert.deepEqual(exec.args.slice(-3), ['--dev-shell', '-c', 'printf "hello world"']);
-  assert.equal(exec.workspace, project);
-  assert.ok(result.calls.some(x => x.args.includes('stop')));
-  const up = result.calls.find(x => x.args.includes('up'));
-  assert.match(up.args[up.args.indexOf('--project-name') + 1], /^dev-r[0-9a-f]{8}-u\d+-[0-9a-f]{16}$/);
-});
-
-test('preserves application exit code and does not stop raw external exec sessions', async t => {
-  const { run } = await fixture(t);
-  const failed = await run([], { FAKE_EXIT: '29' });
-  assert.equal(failed.status, 29);
-  assert.ok(failed.calls.some(x => x.args.includes('stop')));
-  const external = await run([], { FAKE_EXECS: '1' });
-  assert.equal(external.status, 0);
-  assert.ok(!external.calls.some(x => x.args.includes('stop')));
-});
-
-test('maintenance works without optional publishing config; build flags precede service', async t => {
-  const { tool, run } = await fixture(t);
-  await fs.writeFile(path.join(tool, '.env'), 'not a valid dotenv file');
-  const built = await run(['build', '--build-arg', 'NPM_REGISTRY=https://example.com']);
-  assert.equal(built.status, 0);
-  assert.deepEqual(built.calls[0].args.slice(-4), ['build', '--build-arg', 'NPM_REGISTRY=https://example.com', 'pi']);
-  const stopped = await run(['stop']);
-  assert.equal(stopped.status, 0);
-  assert.ok(!stopped.calls.some(x => x.args.includes('config')));
-  const down = await run(['down']);
-  assert.equal(down.status, 0);
-  assert.ok(down.calls.some(x => x.args.includes('down')));
-});
-
-test('deployment configuration rejects overlapping directories and never starts services without configuration', async t => {
-  const { tool, project, run } = await fixture(t);
-  for (const dir of ['/', project, tool, path.join(tool, 'bin'), path.join(tool, 'data'), path.join(tool, '.deploy-keys')]) {
-    const result = await run([], { DEPLOY_DATA_DIR: dir });
-    assert.equal(result.status, 1, result.stderr);
-    assert.ok(!result.calls.some(x => x.args.includes('up')));
-  }
-  const absent = await run(['services', 'up']);
-  assert.equal(absent.status, 1);
-  const ordinary = await run(['shell', '-c', 'true']);
-  assert.equal(ordinary.status, 0);
-  assert.ok(!ordinary.calls.some(x => x.args.some(a => a.endsWith('compose.services.yaml'))));
-});
-
-test('installation-relative deployment data is resolved, created and private, independent of the caller working directory', async t => {
-  const { tool, project, run } = await fixture(t);
-  const result = await run(['shell', '-c', 'true'], { DEPLOY_DATA_DIR: './services-data' });
-  assert.equal(result.status, 0, result.stderr);
-  const directory = path.join(tool, 'services-data');
-  assert.equal((await fs.stat(directory)).mode & 0o777, 0o700);
-  await assert.rejects(fs.access(path.join(project, 'services-data')));
-  const up = result.calls.find(x => x.args.includes('up') && x.args.includes('services'));
-  assert.equal(up.deployData, directory);
-  await fs.chmod(directory, 0o711);
-  assert.equal((await run(['services', 'ps'], { DEPLOY_DATA_DIR: './services-data' })).status, 0);
-  assert.equal((await fs.stat(directory)).mode & 0o777, 0o711, 'do not change permissions on an existing service tree');
-});
-
-test('workspace bind mounts cannot expose installation state, service data, or symlink aliases', async t => {
-  const { tool, root, run } = await fixture(t);
-  for (const workspace of [tool, root, path.join(tool, 'data'), path.join(tool, 'services-data')]) {
-    await fs.mkdir(workspace, { recursive: true });
-    const result = await run(['shell', '-c', 'true'], { DEPLOY_DATA_DIR: './services-data' }, workspace);
-    assert.equal(result.status, 1, result.stderr);
-    assert.ok(!result.calls.some(x => x.args.includes('up')));
-  }
-  const alias = path.join(root, 'service-alias');
-  await fs.symlink(path.join(tool, 'services-data'), alias);
-  const aliased = await run(['shell', '-c', 'true'], { DEPLOY_DATA_DIR: alias }, path.join(tool, 'services-data'));
-  assert.equal(aliased.status, 1, aliased.stderr);
-  const disabled = await run(['shell', '-c', 'true'], { DEPLOY_DATA_DIR: '' }, tool);
-  assert.equal(disabled.status, 1, disabled.stderr);
-});
-
-test('invalid deployment ports and install subdirectories fail before directory creation or service startup', async t => {
-  const { tool, root, run } = await fixture(t);
-  for (const port of ['80', '65536', '01', 'x']) {
-    const directory = path.join(root, 'not-created-' + port);
-    const result = await run(['shell', '-c', 'true'], { DEPLOY_DATA_DIR: directory, DEPLOY_PORT: port });
-    assert.equal(result.status, 1, result.stderr);
-    await assert.rejects(fs.access(directory));
-    assert.ok(!result.calls.some(x => x.args.includes('up')));
-  }
-  const invalid = path.join(tool, 'src', 'private');
-  const result = await run(['shell', '-c', 'true'], { DEPLOY_DATA_DIR: invalid });
-  assert.equal(result.status, 1, result.stderr);
-  await assert.rejects(fs.access(invalid));
-});
-
-test('deployment provisions an installation key and shared control account without public URL or host Node dependency', async t => {
-  const { tool, root, run } = await fixture(t);
-  const services = path.join(root, 'service data');
-  await fs.mkdir(services);
-  const result = await run(['shell', '-c', 'true'], { DEPLOY_DATA_DIR: services });
-  assert.equal(result.status, 0, result.stderr);
-  assert.ok(result.calls.some(x => x.args.includes('--no-recreate') && x.args.includes('services')));
-  assert.ok(result.calls.some(x => x.args.includes('/usr/local/bin/deploy-register')));
-  const up = result.calls.find(x => x.args.includes('up') && x.args.includes('pi'));
-  assert.ok(up.args.some(x => x.endsWith('compose.deploy.yaml')));
-  const dirs = await fs.readdir(path.join(tool, '.deploy-keys'));
-  assert.equal(dirs.length, 1);
-  assert.match(await fs.readFile(path.join(tool, '.deploy-keys', dirs[0], 'known_hosts'), 'utf8'), /^\[app-services\]:2222 ssh-ed25519 /);
-  await assert.rejects(fs.access(path.join(tool, 'data', 'id_ed25519')));
-});
-
-test('build, start and recreate share a checkout-specific image, not another checkout or caller override', async t => {
-  const first = await fixture(t);
-  const second = await fixture(t);
-  const invocations = [
-    await first.run(['build']),
-    await first.run(['rebuild']),
-    await first.run(['shell', '-c', 'true'], { DEV_IMAGE: 'unrelated:caller-override' }),
-    await first.run(['recreate']),
-  ];
-  const images = invocations.flatMap(result => {
-    assert.equal(result.status, 0, result.stderr);
-    return result.calls.map(call => call.image);
+  const tool = path.join(root, "tool"),
+    project = path.join(root, "project with spaces"),
+    fakeBin = path.join(root, "fake-bin"),
+    log = path.join(root, "docker.jsonl");
+  for (const d of ["bin", "lib", "scripts"])
+    await fs.mkdir(path.join(tool, d), { recursive: true });
+  for (const d of [project, fakeBin, path.join(tool, ".deploy-keys")]) await fs.mkdir(d);
+  for (const f of [
+    "bin/pic",
+    "scripts/control.sh",
+    "lib/session-lifecycle.sh",
+    "lib/deployment.sh",
+    "compose.yaml",
+    "compose.deploy.yaml",
+    "compose.services.yaml",
+    ".env.example",
+  ])
+    await fs.copyFile(path.join(repo, f), path.join(tool, f));
+  await fs.writeFile(
+    path.join(fakeBin, "id"),
+    '#!/bin/sh\ncase "$1" in -u) echo "${FAKE_UID:-1000}";; -g) echo "${FAKE_GID:-1000}";; -G) echo "${FAKE_GROUPS:-1000}";; esac\n',
+    { mode: 0o755 },
+  );
+  await fs.writeFile(
+    path.join(fakeBin, "ssh-keygen"),
+    `#!/bin/sh\nif [ "$1" = '-l' ]; then ${hasKeygen ? `exec '${keygen}' "$@"` : `grep -Fq '${hostKey}' "$3"`}; fi\nwhile [ "$1" != '-f' ]; do shift; done\nprintf test-key > "$2"; printf '%s\\n' '${hostKey}' > "$2.pub"\n`,
+    { mode: 0o755 },
+  );
+  await fs.writeFile(
+    path.join(fakeBin, "docker"),
+    `#!${process.execPath}
+const fs=require('node:fs'),args=process.argv.slice(2);
+fs.appendFileSync(process.env.FAKE_LOG,JSON.stringify({args,workspace:process.env.PIC_WORKSPACE,uid:process.env.PIC_UID,gid:process.env.PIC_GID,groups:process.env.PIC_GROUPS,history:process.env.PIC_HISTORY_DIR,image:process.env.PIC_IMAGE,deployData:process.env.DEPLOY_DATA_DIR})+'\\n');
+if(args[0]==='image')process.exitCode=0;
+else if(args[0]==='inspect'&&args.includes('{{.State.Running}}'))process.exitCode=1;
+else if(args.includes('config')&&args.includes('--environment'))for(const k of['DEPLOY_DATA_DIR','DEPLOY_PUBLIC_URL','DEPLOY_PORT'])console.log(k+'='+(process.env[k]||''));
+else if(args.includes('/usr/local/bin/deploy-register'))console.log(process.env.FAKE_HOST_KEY||${JSON.stringify(hostKey)});
+else if(args.includes('up'))process.exitCode=Number(process.env.FAKE_UP_EXIT||0);
+else if(args.includes('/usr/local/bin/pic-workspace-init'))process.exitCode=Number(process.env.FAKE_WORKSPACE_EXIT||0);
+else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='count'){if(process.env.FAKE_COUNT_ERROR)process.exitCode=1;else console.log(process.env.FAKE_LIVE_PI||'0');}
+else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='list'){if(process.env.FAKE_LIST_ERROR)process.exitCode=1;else process.stdout.write(process.env.FAKE_RUNNING||'');}
+else if(args.includes('ps')&&args.includes('-q')){if(process.env.FAKE_NO_CONTAINER!=='1')console.log('fake-container');}
+else if(args[0]==='inspect')console.log(process.env.FAKE_EXECS||'0');
+else if(args[0]==='run')process.exitCode=Number(process.env.FAKE_RUN_EXIT||0);
+else if(args.includes('exec'))process.exitCode=Number(process.env.FAKE_EXIT||0);
+`,
+    { mode: 0o755 },
+  );
+  const environment = (env = {}) => ({
+    ...process.env,
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    FAKE_LOG: log,
+    DEPLOY_DATA_DIR: "",
+    DEPLOY_PUBLIC_URL: "",
+    DEPLOY_PORT: "18080",
+    ...env,
   });
-  assert.ok(images.length > 0);
-  assert.equal(new Set(images).size, 1);
-  assert.match(images[0], /^devctl:r[0-9a-f]{8}$/);
-  const other = await second.run(['build'], {}, first.project);
-  assert.equal(other.status, 0, other.stderr);
-  assert.notEqual(other.calls[0].image, images[0]);
+  async function calls() {
+    const out = (await fs.readFile(log, "utf8").catch(() => ""))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map(JSON.parse);
+    await fs.writeFile(log, "");
+    return out;
+  }
+  async function run(args, env = {}, cwd = project) {
+    const r = spawnSync(
+      "bash",
+      [path.join(tool, "scripts/control.sh"), ...args],
+      { cwd, encoding: "utf8", env: environment(env), timeout: 10000 },
+    );
+    return { ...r, calls: await calls() };
+  }
+  async function publicRun(args = [], env = {}) {
+    const r = spawnSync("bash", [path.join(tool, "bin/pic"), ...args], {
+      cwd: project,
+      encoding: "utf8",
+      env: environment(env),
+      timeout: 10000,
+    });
+    return { ...r, calls: await calls() };
+  }
+  async function menu(input, env = {}) {
+    const proc = pty.spawn("/bin/bash", [path.join(tool, "bin/pic")], {
+      cwd: project,
+      env: environment(env),
+      cols: 110,
+      rows: 35,
+    });
+    let output = "";
+    proc.onData((d) => (output += d));
+    const exit = new Promise((resolve) => proc.onExit(resolve));
+    const timeout = setTimeout(() => proc.kill("SIGTERM"), 8000);
+    for (let i = 0; i < 100 && !output.includes("选择（0 返回）"); i++)
+      await new Promise((r) => setTimeout(r, 15));
+    proc.write(input);
+    const result = await exit;
+    clearTimeout(timeout);
+    return { ...result, output, calls: await calls() };
+  }
+  return { root, tool, project, run, publicRun, menu };
+}
+test("public command is only pic: help and rejected old syntax have no Docker side effects", async (t) => {
+  const f = await fixture(t);
+  const help = await f.publicRun(["--help"]);
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /启动并托管 Pi.*断开终端后继续运行/);
+  assert.doesNotMatch(help.stdout, /恢复历史对话|开始新对话/);
+  assert(!help.stdout.includes("pic attach"));
+  for (const args of [
+    [],
+    ["new"],
+    ["sessions"],
+    ["attach", "main"],
+    ["web", "start"],
+    ["services", "up"],
+    ["shell"],
+  ]) {
+    const r = await f.publicRun(args);
+    assert.equal(r.status, 2);
+    assert.deepEqual(r.calls, []);
+  }
+  await assert.rejects(fs.access(path.join(repo, "bin/devctl")));
+  await assert.rejects(fs.access(path.join(repo, "dev-entrypoint.sh")));
+  for (const file of [
+    "Dockerfile",
+    "compose.yaml",
+    "scripts/control.sh",
+    "pic-entrypoint.sh",
+    "scripts/bootstrap-pi.mjs",
+  ])
+    assert.doesNotMatch(
+      await fs.readFile(path.join(repo, file), "utf8"),
+      /DEVCTL_|DEV_(UID|GID|GROUPS|IMAGE|WORKSPACE|SESSION_DIR)|\/opt\/devctl|\.devctl-/,
+    );
 });
-
-test('host SSH uses shared credentials without a source mount or project container and preserves command status', async t => {
-  const { tool, root, project, run } = await fixture(t);
-  const env = { DEPLOY_DATA_DIR: './services-data' };
-  assert.equal((await run(['server', '-c', 'id'], env, tool)).status, 0);
-  const first = await fs.readFile(path.join(tool, '.deploy-keys', 'installation', 'id_ed25519'), 'utf8');
-  await fs.rm(project, { recursive: true });
-  const command = 'sudo supervisorctl status; printf "%s" "hello world"';
-  const result = await run(['server', '-c', command], env, '/');
-  assert.equal(result.status, 0, result.stderr);
-  const client = result.calls.find(c => c.args[0] === 'run');
-  assert.ok(client);
-  assert.deepEqual(client.args.slice(-3), ['--service-shell', '-c', command]);
-  assert.ok(client.args.includes('-i')); assert.ok(!client.args.includes('-it'));
-  assert.equal(client.args[client.args.indexOf('--pull') + 1], 'never');
-  assert.ok(!client.args.some(a => a.includes('target=/workspace')));
-  assert.ok(!result.calls.some(c => c.args.includes('exec') && c.args.includes('pi')));
-  assert.equal(await fs.readFile(path.join(tool, '.deploy-keys', 'installation', 'id_ed25519'), 'utf8'), first);
-  assert.deepEqual(await fs.readdir(path.join(tool, '.deploy-keys')), ['installation']);
-  const failed = await run(['server', '-c', 'exit 23'], { ...env, FAKE_RUN_EXIT: '23' }, root);
-  assert.equal(failed.status, 23);
-  const terminal = await run(['server'], env, '/');
-  assert.equal(terminal.status, 0, terminal.stderr);
-  assert.equal(terminal.calls.find(c => c.args[0] === 'run').args.at(-1), '--service-shell');
-  const absent = await run(['server'], {}, root);
-  assert.equal(absent.status, 1);
-  assert.ok(!absent.calls.some(c => c.args[0] === 'run'));
+test("pic menu owns hosted processes, not native Pi conversation commands", async (t) => {
+  const f = await fixture(t);
+  const r = await f.menu("8\r0\r");
+  assert.equal(r.exitCode, 0);
+  assert.doesNotMatch(r.output, /Web|浏览器|18090|恢复历史对话|开始新对话/);
+  assert.match(r.output, /请选择菜单中的编号/);
+  assert.match(r.output, /接回运行中的 Pi.*同一进程/);
+  assert.match(r.output, /启动并托管 Pi.*断开终端后继续运行/);
+  assert.match(r.output, /结束运行中的 Pi.*停止进程/);
+  assert.deepEqual(r.calls, []);
 });
-
-test('development and service shells forward the same Bash argument vectors', async t => {
-  const { run } = await fixture(t);
-  for (const [command, mode] of [['shell', '--dev-shell'], ['server', '--service-shell']]) {
-    for (const args of [[], ['-lc', 'printf "%s\\n" "$1"', 'label', 'a b'], ['-s', '--', '', "single'quote", '$literal;*', 'line\nbreak']]) {
-      const result = await run([command, ...args], { DEPLOY_DATA_DIR: './services-data' });
-      assert.equal(result.status, 0, result.stderr);
-      const client = result.calls.find(c => c.args.includes(mode));
-      assert.ok(client, `${command}: ${JSON.stringify(args)}`);
-      assert.deepEqual(client.args.slice(client.args.indexOf(mode)), [mode, ...args]);
-    }
+test("menu connects selected live process, never creates a replacement or resumes history", async (t) => {
+  const f = await fixture(t);
+  const r = await f.menu("1\r1\r\r0\r", {
+    FAKE_RUNNING: "main\t0\t1700000000\n",
+  });
+  assert.equal(r.exitCode, 0, r.output);
+  assert.match(r.output, /后台运行.*没有终端连接/);
+  assert(
+    r.calls.some(
+      (c) => c.args.slice(-3).join("|") === "--pic-session|attach|main",
+    ),
+  );
+  assert(
+    !r.calls.some((c) => c.args.includes("history") || c.args.includes("start") || c.args.includes("new")),
+  );
+});
+test("menu launches only a hosted process; unknown running status never triggers a launch", async (t) => {
+  const f = await fixture(t);
+  const r = await f.menu("2\r\r0\r");
+  assert.equal(r.exitCode, 0);
+  assert(
+    r.calls.some((c) => c.args.slice(-2).join("|") === "--pic-session|start"),
+  );
+  assert(!r.calls.some(c => c.args.some(arg => ["--resume", "--continue", "--model", "--thinking"].includes(arg))));
+  const bad = await f.menu("1\r0\r", { FAKE_LIST_ERROR: "1" });
+  assert.equal(bad.exitCode, 0);
+  assert.match(bad.output, /运行状态未确认/);
+  assert(!bad.calls.some((c) => c.args.includes("--pic-session")));
+});
+test("no running process is reported as absent, never auto-created", async (t) => {
+  const f = await fixture(t);
+  const r = await f.menu("1\r0\r", { FAKE_NO_CONTAINER: "1" });
+  assert.equal(r.exitCode, 0);
+  assert.match(r.output, /没有运行中的 Pi/);
+  assert(!r.calls.some(c => c.args.includes("up") || c.args.includes("--pic-session")));
+});
+test("process selection and termination can be cancelled; termination requires confirmation", async (t) => {
+  const f = await fixture(t);
+  const env = { FAKE_RUNNING: "main\t0\t1700000000\n" };
+  for (const input of ["1\r0\r0\r", "3\r1\rn\r0\r"]) {
+    const cancelled = await f.menu(input, env);
+    assert.equal(cancelled.exitCode, 0);
+    assert(!cancelled.calls.some(c => c.args.includes("--pic-session") || c.args.includes("close")));
+  }
+  const ended = await f.menu("3\r1\ry\r\r0\r", env);
+  assert.equal(ended.exitCode, 0);
+  assert(ended.calls.some(c => c.args.slice(-3).join("|") === "/usr/local/bin/pic-session|close|main"));
+  assert(!ended.calls.some(c => c.args.includes("--pic-session")));
+});
+test("private dispatcher rejects unrecognized operations before Docker", async (t) => {
+  const f = await fixture(t);
+  for (const args of [
+    [],
+    ["new"],
+    ["attach", "main"],
+    ["services", "up"],
+    ["unknown"],
+    ["pi-history"],
+    ["pi-start", "--resume"],
+    ["pi-connect", "a;id"],
+  ]) {
+    const r = await f.run(args);
+    assert.equal(r.status, 2);
+    assert.deepEqual(r.calls, []);
   }
 });
-
-test('real OpenSSH rejects malformed enrollment without replacing the trusted host key', {
-  skip: !hasKeygen && 'OpenSSH key parser is required for this regression; installed in CI',
-}, async t => {
-  const { tool, run } = await fixture(t);
-  const env = { DEPLOY_DATA_DIR: './services-data' };
-  assert.equal((await run(['server', '-c', 'true'], env)).status, 0);
-  const file = path.join(tool, '.deploy-keys', 'installation', 'known_hosts');
-  const before = await fs.readFile(file, 'utf8');
-  for (const key of ['garbage', 'ssh-ed25519 AAA\nHost *', 'ssh-rsa AAA', 'ssh-ed25519 ' + 'A'.repeat(68)]) {
-    const result = await run(['server', '-c', 'true'], { ...env, FAKE_HOST_KEY: key });
-    assert.equal(result.status, 1); assert.ok(!result.calls.some(c => c.args[0] === 'run'));
-    assert.equal(await fs.readFile(file, 'utf8'), before);
+test("Bash argument boundaries, no-TTY exec and application exit code are preserved", async (t) => {
+  const f = await fixture(t);
+  const cmd = 'printf "%s" "hello world"';
+  const r = await f.run(["dev-shell", "-c", cmd]);
+  assert.equal(r.status, 0, r.stderr);
+  const c = r.calls.find((c) => c.args.includes("--dev-shell"));
+  assert(c.args.includes("-T"));
+  assert.deepEqual(c.args.slice(-3), ["--dev-shell", "-c", cmd]);
+  assert.equal(c.workspace, f.project);
+  assert.match(c.history, /project-history\/1000-/);
+  assert(r.calls.some((c) => c.args.includes("stop")));
+  const fail = await f.run(["dev-shell"], { FAKE_EXIT: "29" });
+  assert.equal(fail.status, 29);
+  const ext = await f.run(["dev-shell"], { FAKE_EXECS: "1" });
+  assert(!ext.calls.some((c) => c.args.includes("stop")));
+});
+test("attachment failure never falls back to launching Pi or restoring history", async (t) => {
+  const f = await fixture(t);
+  const r = await f.run(["pi-connect", "main"], { FAKE_EXIT: "17", FAKE_LIVE_PI: "1" });
+  assert.equal(r.status, 17);
+  assert(
+    r.calls.some(
+      (c) => c.args.slice(-3).join("|") === "--pic-session|attach|main",
+    ),
+  );
+  assert(!r.calls.some((c) => c.args.includes("history") || c.args.includes("start") || c.args.includes("--resume")));
+});
+test("maintenance works without optional publishing config; build args precede service", async (t) => {
+  const f = await fixture(t);
+  await fs.writeFile(path.join(f.tool, ".env"), "invalid dotenv");
+  const built = await f.run([
+    "dev-build",
+    "--build-arg",
+    "NPM_REGISTRY=https://example.com",
+  ]);
+  assert.equal(built.status, 0);
+  assert.deepEqual(built.calls[0].args.slice(-4), [
+    "build",
+    "--build-arg",
+    "NPM_REGISTRY=https://example.com",
+    "pi",
+  ]);
+  for (const action of ["dev-stop", "dev-remove"]) {
+    const r = await f.run([action]);
+    assert.equal(r.status, 0);
+    assert(!r.calls.some((c) => c.args.includes("config")));
   }
 });
-
-test('host root maps to non-root development identity, but retains host-scoped lifecycle names', async t => {
-  const { run } = await fixture(t);
-  const root = { FAKE_UID: '0', FAKE_GID: '0', FAKE_GROUPS: '0,27' };
-  for (const args of [[], ['shell', '-c', 'id'], ['recreate'], ['server', '-c', 'id'], ['services', 'up'], ['build'], ['stop'], ['down'], ['ps']]) {
-    const result = await run(args, { ...root, DEPLOY_DATA_DIR: './services-data', DEV_UID: '0', DEV_GID: '0', DEV_GROUPS: '0' });
-    assert.equal(result.status, 0, `${JSON.stringify(args)}: ${result.stderr}`);
-    assert.ok(result.calls.length);
-    for (const call of result.calls) {
-      assert.equal(call.uid, '1000'); assert.equal(call.gid, '1000'); assert.equal(call.groups, '1000');
-      assert.match(call.session, /project-sessions\/0-[0-9a-f]{16}$/);
+test("background Pi, external terminals and unreadable state all block destructive maintenance", async (t) => {
+  const f = await fixture(t);
+  for (const action of ["dev-stop", "dev-remove", "dev-recreate"])
+    for (const env of [
+      { FAKE_LIVE_PI: "1" },
+      { FAKE_EXECS: "2" },
+      { FAKE_COUNT_ERROR: "1" },
+    ]) {
+      const r = await f.run([action], env);
+      assert.equal(r.status, 1, r.stderr);
+      assert(
+        !r.calls.some(
+          (c) =>
+            c.args.includes("--force-recreate") ||
+            c.args.includes("down") ||
+            c.args.includes("stop"),
+        ),
+      );
     }
-    const prepare = result.calls.findIndex(c => c.args.includes('/usr/local/bin/dev-workspace-init'));
-    if (!args.length || args[0] === 'shell') {
-      assert.ok(prepare >= 0);
-      assert.ok(result.calls.findIndex(c => c.args.includes('--dev-shell') || (c.args.includes('exec') && c.args.at(-1) === '/usr/local/bin/dev-entrypoint')) > prepare);
-      assert.equal(result.calls[prepare].args.at(-1), '1000');
-      const up = result.calls.find(c => c.args.includes('up') && c.args.includes('pi'));
-      assert.match(up.args[up.args.indexOf('--project-name') + 1], /^dev-r[0-9a-f]{8}-u0-[0-9a-f]{16}$/);
-    } else assert.equal(prepare, -1, 'maintenance and remote-only sessions must not modify workspace ACLs');
-    if (args[0] === 'server') {
-      const client = result.calls.find(c => c.args[0] === 'run');
-      assert.ok(client.args.includes('DEV_UID=1000'));
-      assert.ok(client.args.includes('DEV_GID=1000'));
-      assert.ok(client.args.includes('DEV_GROUPS=1000'));
-      assert.ok(client.args.includes('--tmpfs'));
-    }
+});
+test("workspace and deployment paths cannot expose installation secrets or aliases", async (t) => {
+  const f = await fixture(t);
+  for (const dir of [
+    "/",
+    f.project,
+    f.tool,
+    path.join(f.tool, "data"),
+    path.join(f.tool, ".deploy-keys"),
+  ]) {
+    const r = await f.run(["dev-shell"], { DEPLOY_DATA_DIR: dir });
+    assert.equal(r.status, 1, r.stderr);
+    assert(!r.calls.some((c) => c.args.includes("up")));
+  }
+  for (const cwd of [f.tool, f.root, path.join(f.tool, ".deploy-keys")]) {
+    const r = await f.run(["dev-shell"], {}, cwd);
+    assert.equal(r.status, 1, r.stderr);
+  }
+  const alias = path.join(f.root, "service-alias");
+  await fs.symlink(path.join(f.tool, ".deploy-keys"), alias);
+  const r = await f.run(
+    ["dev-shell"],
+    { DEPLOY_DATA_DIR: alias },
+    path.join(f.tool, ".deploy-keys"),
+  );
+  assert.equal(r.status, 1);
+  assert.equal((await f.run(["service-start"])).status, 1);
+});
+test("deployment directory creation is private and installation-relative; invalid ports fail first", async (t) => {
+  const f = await fixture(t);
+  const r = await f.run(["service-state"], {
+    DEPLOY_DATA_DIR: "./services-data",
+  });
+  assert.equal(r.status, 0);
+  const data = path.join(f.tool, "services-data");
+  assert.equal((await fs.stat(data)).mode & 0o777, 0o700);
+  await fs.chmod(data, 0o711);
+  assert.equal(
+    (await f.run(["service-state"], { DEPLOY_DATA_DIR: "./services-data" }))
+      .status,
+    0,
+  );
+  assert.equal((await fs.stat(data)).mode & 0o777, 0o711);
+  for (const port of ["80", "65536", "01", "x"]) {
+    const directory = path.join(f.root, "absent-" + port);
+    const r = await f.run(["service-start"], {
+      DEPLOY_DATA_DIR: directory,
+      DEPLOY_PORT: port,
+    });
+    assert.equal(r.status, 1);
+    await assert.rejects(fs.access(directory));
   }
 });
-
-test('workspace preparation errors preserve failure and never open a session', async t => {
-  const { run } = await fixture(t);
-  const root = { FAKE_UID: '0', FAKE_GID: '0', FAKE_GROUPS: '0' };
-  const upFailed = await run(['shell'], { ...root, FAKE_UP_EXIT: '19' });
-  assert.equal(upFailed.status, 19);
-  assert.ok(!upFailed.calls.some(c => c.args.includes('exec')));
-  const accessFailed = await run(['shell'], { ...root, FAKE_WORKSPACE_EXIT: '21' });
-  assert.equal(accessFailed.status, 21);
-  assert.ok(!accessFailed.calls.some(c => c.args.includes('--dev-shell') || c.args.includes('stop')));
-  const ordinary = await run(['shell']);
-  assert.equal(ordinary.status, 0, ordinary.stderr);
-  assert.ok(!ordinary.calls.some(c => c.args.includes('/usr/local/bin/dev-workspace-init')));
+test("SSH management uses separate service container with no project or Pi-data mount", async (t) => {
+  const f = await fixture(t);
+  const env = { DEPLOY_DATA_DIR: "./services-data" };
+  const r = await f.run(
+    ["service-shell", "-lc", 'echo "hello world"'],
+    env,
+    "/",
+  );
+  assert.equal(r.status, 0, r.stderr);
+  const c = r.calls.find((c) => c.args[0] === "run");
+  assert(c);
+  assert.deepEqual(c.args.slice(-3), [
+    "--service-shell",
+    "-lc",
+    'echo "hello world"',
+  ]);
+  assert(c.args.includes("-i"));
+  assert(!c.args.some((x) => x.includes("target=/workspace")));
+  assert(c.args.includes("/run/pic-ssh:rw,noexec,nosuid,nodev,mode=0700"));
+  const fail = await f.run(["service-shell", "-c", "exit 23"], {
+    ...env,
+    FAKE_RUN_EXIT: "23",
+  });
+  assert.equal(fail.status, 23);
 });
-
-test('rejects / workspace even for host root, without invoking Docker', async t => {
-  const { run } = await fixture(t);
-  for (const env of [{}, { FAKE_UID: '0', FAKE_GID: '0', FAKE_GROUPS: '0' }]) {
-    const result = await run([], env, '/');
-    assert.equal(result.status, 2);
-    assert.deepEqual(result.calls, []);
+test("image and project identities use pic only and are not caller-overridable", async (t) => {
+  const f = await fixture(t),
+    other = await fixture(t);
+  let image;
+  for (const args of [
+    ["dev-build"],
+    ["dev-rebuild"],
+    ["dev-shell"],
+    ["dev-recreate"],
+  ]) {
+    const r = await f.run(args, { PIC_IMAGE: "unrelated" });
+    assert.equal(r.status, 0);
+    for (const c of r.calls) {
+      image ??= c.image;
+      assert.equal(c.image, image);
+    }
+    const up = r.calls.find((c) => c.args.includes("up"));
+    if (up)
+      assert.match(
+        up.args[up.args.indexOf("--project-name") + 1],
+        /^pic-r[0-9a-f]{8}-u1000-[0-9a-f]{16}$/,
+      );
+  }
+  assert.match(image, /^pic:r[0-9a-f]{8}$/);
+  assert.notEqual((await other.run(["dev-build"])).calls[0].image, image);
+});
+test("host root remains host-scoped but runtime maps to non-root; ACL failure never opens Pi", async (t) => {
+  const f = await fixture(t);
+  const env = { FAKE_UID: "0", FAKE_GID: "0", FAKE_GROUPS: "0,27" };
+  const r = await f.run(["pi-start"], env);
+  assert.equal(r.status, 0);
+  assert(
+    r.calls.some((c) => c.args.includes("/usr/local/bin/pic-workspace-init")),
+  );
+  for (const c of r.calls) {
+    assert.equal(c.uid, "1000");
+    assert.equal(c.gid, "1000");
+    assert.equal(c.groups, "1000");
+    assert.match(c.history, /project-history\/0-/);
+  }
+  const fail = await f.run(["pi-start"], { ...env, FAKE_WORKSPACE_EXIT: "21" });
+  assert.equal(fail.status, 21);
+  assert(!fail.calls.some((c) => c.args.includes("--pic-session")));
+  const up = await f.run(["pi-start"], { ...env, FAKE_UP_EXIT: "19" });
+  assert.equal(up.status, 19);
+  assert(!up.calls.some((c) => c.args.includes("exec")));
+});
+test(
+  "invalid SSH host-key enrollment leaves the existing trusted file unchanged",
+  { skip: !hasKeygen },
+  async (t) => {
+    const f = await fixture(t),
+      env = { DEPLOY_DATA_DIR: "./services-data" };
+    assert.equal((await f.run(["service-shell"], env)).status, 0);
+    const file = path.join(f.tool, ".deploy-keys/installation/known_hosts"),
+      prior = await fs.readFile(file, "utf8");
+    for (const key of [
+      "garbage",
+      "ssh-rsa AAA",
+      "ssh-ed25519 " + "A".repeat(68),
+    ]) {
+      const r = await f.run(["service-shell"], { ...env, FAKE_HOST_KEY: key });
+      assert.equal(r.status, 1);
+      assert.equal(await fs.readFile(file, "utf8"), prior);
+      assert(!r.calls.some((c) => c.args[0] === "run"));
+    }
+  },
+);
+test("removed control plane has no menu, dispatcher, dependencies or socket mount", async (t) => {
+  const f = await fixture(t);
+  for (const action of ["web-start", "web-stop", "web-state", "web-logs", "web-build", "web-password"]) {
+    const r = await f.run([action]);
+    assert.equal(r.status, 2);
+    assert.deepEqual(r.calls, []);
+  }
+  for (const file of ["web", "lib/web.sh", "config/nginx-pic.conf"])
+    await assert.rejects(fs.access(path.join(repo, file)));
+  for (const file of ["bin/pic", "scripts/control.sh", "Dockerfile", "compose.yaml", "compose.deploy.yaml", "compose.services.yaml", "package.json", ".npmrc", "scripts/check.sh", ".github/workflows/ci.yml"]) {
+    const text = await fs.readFile(path.join(repo, file), "utf8");
+    assert.doesNotMatch(text, /pic-web|web-start|web\/|18090|docker\.sock|@xterm|@lydell\/node-pty|playwright/);
+  }
+});
+test("Pi follows npm latest without an exact version or project lockfile", async () => {
+  const pkg = JSON.parse(await fs.readFile(path.join(repo, "package.json"), "utf8"));
+  assert.equal(pkg.dependencies["@earendil-works/pi-coding-agent"], "latest");
+  assert.match(await fs.readFile(path.join(repo, ".npmrc"), "utf8"), /^package-lock=false$/m);
+  for (const file of ["package-lock.json", "npm-shrinkwrap.json"])
+    await assert.rejects(fs.access(path.join(repo, file)));
+  const image = await fs.readFile(path.join(repo, "Dockerfile"), "utf8");
+  assert.match(image, /COPY package\.json \.npmrc LICENSE \/opt\/pic\//);
+  assert.match(image, /npm install --prefix \/opt\/pic --omit=dev --ignore-scripts --package-lock=false/);
+  assert.doesNotMatch(image, /npm ci|package-lock\.json|pi-coding-agent@\d/);
+  const ci = await fs.readFile(path.join(repo, ".github/workflows/ci.yml"), "utf8");
+  assert.match(ci, /npm install --ignore-scripts --package-lock=false/);
+  assert.doesNotMatch(ci, /npm ci/);
+});
+test("host root directory is never a project bind", async (t) => {
+  const f = await fixture(t);
+  for (const env of [{}, { FAKE_UID: "0" }]) {
+    const r = await f.run(["pi-start"], env, "/");
+    assert.equal(r.status, 2);
+    assert.deepEqual(r.calls, []);
   }
 });

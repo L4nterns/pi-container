@@ -10,7 +10,7 @@ const repo = fileURLToPath(new URL('..', import.meta.url));
 const helper = path.join(repo, 'tests/helpers/docker-smoke.sh');
 
 async function fixture(t) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'devctl-smoke-test-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pic-smoke-test-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const bin = path.join(root, 'bin'); await fs.mkdir(bin);
   const log = path.join(root, 'docker.jsonl');
@@ -25,14 +25,17 @@ fs.appendFileSync(process.env.CALL_LOG,JSON.stringify(args)+'\\n');
 if(args[0]==='inspect') console.log(args.includes('{{.State.Status}}')?(process.env.CONTAINER_STATE||'running'):'status=exited exit=17 oom=false error=""');
 else if(args[0]==='logs') console.log('injected startup failure');
 else if(args[0]==='exec') {
-  if(args.includes('/opt/app-services/healthcheck.sh')) process.exitCode=process.env.READY==='yes'?0:1;
+  if(args.includes('pic-session')&&args.at(-1)==='count') console.log(fs.existsSync(path.join(process.env.TMUX_TEST_DIR,'closed'))?'0':'1');
+  else if(args.includes('pic-session')&&args.includes('close')) fs.writeFileSync(path.join(process.env.TMUX_TEST_DIR,'closed'),'yes');
+  else if(args.some(a=>a.includes('test ! -s /tmp/live-pi-pid'))) console.log('123');
+  else if(args.includes('/opt/app-services/healthcheck.sh')) process.exitCode=process.env.READY==='yes'?0:1;
   else if(args.includes('deploy-register')) console.log(key);
-  else if(args.includes('dev-entrypoint')&&args.at(-1)==='cat /workspace/root-only') process.exitCode=1;
+  else if(args.includes('pic-entrypoint')&&args.at(-1)==='cat /workspace/root-only') process.exitCode=1;
   else if(args.includes('cat')&&args.includes('/srv/app-services/ssh/ssh_host_ed25519_key.pub')) console.log(key);
-  else if(args.some(a=>a.includes('exit 37'))||(args.includes('dev-entrypoint')&&args.includes('-s'))) process.exitCode=37;
+  else if(args.some(a=>a.includes('exit 37'))||(args.includes('pic-entrypoint')&&args.includes('-s'))) process.exitCode=37;
   else if(args.includes('curl')) console.log(args.includes('%{http_code}')?'404':'Hello from Python');
 } else if(args[0]==='run') {
-  if(args.includes('no-new-privileges:true')&&args.includes('none')&&!args.includes('--mount')) {
+  if(args.includes('no-new-privileges:true')&&args.includes('none')&&!args.includes('--mount')&&!args.includes('--read-only')) {
     console.error('Service administration needs sudo; do not set no-new-privileges on this container');
     process.exitCode=1;
   } else if(args[args.indexOf('--entrypoint')+1]==='ssh-keygen') {
@@ -45,7 +48,7 @@ else if(args[0]==='exec') {
 `, { mode: 0o755 });
   return async (args, env = {}) => {
     const result = spawnSync('bash', args, { cwd: repo, encoding: 'utf8', timeout: 15000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALL_LOG: log, HOST_RUNTIME_LOG: runtimeLog, ...env } });
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CALL_LOG: log, HOST_RUNTIME_LOG: runtimeLog, TMUX_TEST_DIR:root, ...env } });
     const calls = (await fs.readFile(log, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(JSON.parse);
     await fs.writeFile(log, '');
     return { ...result, calls, hostRuntimeCalls: await fs.readFile(runtimeLog, 'utf8').catch(() => '') };

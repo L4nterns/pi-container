@@ -2,18 +2,18 @@ services:
   pi:
     build:
       context: .
-    image: ${DEV_IMAGE:?由 devctl 命令设置}
+    image: ${PIC_IMAGE:?由 pic 设置}
     init: true
     security_opt:
       - no-new-privileges:true
     entrypoint: ["sleep", "infinity"]
     tmpfs:
-      - /run/devctl-ssh:rw,noexec,nosuid,nodev,mode=0700
+      - /run/pic-ssh:rw,noexec,nosuid,nodev,mode=0700
     environment:
-      DEV_UID: ${DEV_UID:?由 devctl 命令设置}
-      DEV_GID: ${DEV_GID:?由 devctl 命令设置}
-      DEV_GROUPS: ${DEV_GROUPS:?由 devctl 命令设置}
-      PI_CODING_AGENT_SESSION_DIR: ${DEV_SESSION_DIR:?由 devctl 命令设置}
+      PIC_UID: ${PIC_UID:?由 pic 设置}
+      PIC_GID: ${PIC_GID:?由 pic 设置}
+      PIC_GROUPS: ${PIC_GROUPS:?由 pic 设置}
+      PI_CODING_AGENT_SESSION_DIR: ${PIC_HISTORY_DIR:?由 pic 设置}
     volumes:
       - type: bind
         source: ./data
@@ -21,7 +21,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${DEV_WORKSPACE:?由 devctl 命令设置}
+        source: ${PIC_WORKSPACE:?由 pic 设置}
         target: /workspace
         bind:
           create_host_path: false

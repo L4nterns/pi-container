@@ -1,0 +1,5 @@
+{
+  "packages": [
+    { "source": "/opt/pic/packages/pi-provider-gateway", "version": "1.0.0" }
+  ]
+}

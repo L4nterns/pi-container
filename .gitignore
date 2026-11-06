@@ -7,4 +7,5 @@ services-data/
 .deploy-keys/
 .services.lock
 node_modules/
+**/node_modules/
 workspace/
