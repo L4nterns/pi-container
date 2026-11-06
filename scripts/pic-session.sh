@@ -2,7 +2,9 @@
 # Unprivileged, container-local live-process manager. Saved conversations belong
 # to Pi; a tmux session here means a RUNNING process, never an inactive history.
 set -euo pipefail
-export LC_ALL=C
+# The Debian image provides C.UTF-8: keep deterministic English diagnostics
+# without making tmux and the hosted Pi inherit the ASCII-only C locale.
+export LC_ALL=C.UTF-8
 [[ $(id -u) != 0 ]] || { echo 'Pi 进程不能以 root 运行。' >&2; exit 1; }
 name=${2:-}
 valid_name() { [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ ]]; }
