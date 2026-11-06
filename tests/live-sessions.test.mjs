@@ -13,7 +13,7 @@ async function wait(fn) {
   throw new Error('live process check timed out');
 }
 
-test('real tmux: streaming, input, detach and PTY loss preserve the original process with or without deployment', {
+test('real tmux: streaming, input, detach and client SIGHUP preserve the original process with or without deployment', {
   skip: !tmux || process.getuid?.() === 0 ? 'requires non-root tmux; CI installs it' : false,
   timeout: 30000,
 }, async t => {
@@ -100,7 +100,17 @@ setInterval(() => {
     assert.equal(await readFile(log, 'utf8'), original);
     const second = attach();
     await wait(() => second.output.includes(`STREAM:${original.trim()}:`));
-    second.p.kill('SIGHUP'); await wait(() => second.exited);
+    // Signal the actual foreground tmux client, as a terminal hangup would.
+    // Older util-linux script (Ubuntu 2.39) handles SIGHUP differently from
+    // 2.41; signaling only that test wrapper is not a portable hangup fixture.
+    const attached = spawnSync(join(bin, 'tmux'), ['-L', 'pic', 'list-clients', '-t', '=main', '-F', '#{client_pid}'], { env, encoding: 'utf8', timeout: 5000 });
+    assert.equal(attached.status, 0, attached.stderr);
+    const clientPids = attached.stdout.trim().split('\n').filter(Boolean);
+    assert.equal(clientPids.length, 1, 'only the second client should be attached');
+    assert.match(clientPids[0], /^[1-9][0-9]*$/);
+    assert(Number(clientPids[0]) > 1);
+    process.kill(Number(clientPids[0]), 'SIGHUP');
+    await wait(() => second.exited);
     await wait(() => /main\t0\t/.test(run(['list']).stdout));
     const disconnectedProgress = await progress();
     await wait(async () => await progress() > disconnectedProgress + 2);

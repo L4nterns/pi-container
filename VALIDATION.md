@@ -53,6 +53,7 @@ tmux 的外层客户端类型决定实际输出颜色。`xterm` 的基础色输�
 
 - Node 测试 **109 项：106 通过、0 失败、3 跳过**；另有 **10 项 Python 自启动配置测试全部通过**。统计包含参数化子测试，重新验证时以 `npm run check` 实际输出为准。
 - Bash / POSIX sh 语法、Python AST、ShellCheck 0.10.0 和 `git diff --check` 通过。Python 与 ShellCheck 仅解压到临时工具目录，不安装系统软件包。
+- tmux 挂断回归直接对实际客户端发送 SIGHUP，不依赖 `script` 包装进程的信号转发；Ubuntu util-linux 2.39.3 与本机 2.41.5 各连续复跑 3 次通过，原 PID、断开后输出和接回断言均保留。Ubuntu 工具仅校验官方 HTTPS 包索引 SHA256 后解包到 `/tmp`，未系统安装。
 - root 隔离 chroot、root + ACL、完整服务 rootfs 三项检查在非 root 环境跳过。
 - 没有本机 Docker CLI / daemon 时，不声称完成实际镜像构建、Compose 集成或宿主升级。
 
