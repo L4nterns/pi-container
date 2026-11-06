@@ -38,19 +38,19 @@ pic
 
 ## Gateway 在线安装
 
-首次初始化开发环境时，通用引导器按 `config/pi-bootstrap.json` 调用原生 `pi install`，从公开的 [pi-provider-gateway](https://github.com/L4nterns/pi-provider-gateway) 仓库下载插件；**不需要 GitHub token**，pic 仓库、源码包和镜像均不捆绑插件实现。source 不带版本、tag 或提交 SHA，跟随仓库默认分支（当前为 `main`）。
+首次初始化开发环境时，通用引导器按 `config/pi-bootstrap.json` 调用原生 `pi install`，从公开的 [pi-provider-gateway](https://github.com/L4nterns/pi-provider-gateway) 仓库下载插件；**不需要 GitHub token**，pic 仓库、源码包和镜像均不捆绑插件实现。安装源不带版本、tag 或提交 SHA，首次安装解析仓库默认分支的当前内容。
 
-之后每次启动新的托管 Pi，在共享 `data/` 没有其他托管 Pi 使用时，自动调用原生 `pi update <source>` 获取最新提交，**不需要为插件更新重建镜像**。插件初始化和更新在启动 Pi 前完成，失败会明确报错并拒绝本次新启动，修复后重试；首次在线安装需要能访问 GitHub 与 npm。
+首次安装需要能访问 GitHub 与 npm；下载失败会明确报错，且不写完成标记，修复网络后可重试。安装存于持久化的 `data/`，成功后引导器不重复安装；同一 source 被用户卸载后也不会每次启动自动装回。
 
-接回原进程、查看列表、开发 Shell 和服务 Shell 不触发插件更新。每个托管 Pi 在整个存活期间持有共享数据中的读租约；有其他项目的托管 Pi（包括已断开终端的后台 Pi）时，新启动沿用已就绪的插件，延后更新，直到下一次所有托管 Pi 都已退出后的启动。不重启现有 Pi，不做热更新或后台定时轮询。直接在 Shell 运行 Pi 或手动 `pi update` 不受此租约保护，可信操作者应自行协调。
+**不固定版本不等于每次启动自动升级。** pic 不增加插件更新策略、进程租约或额外启动器；插件后续更新由 Pi 原生包管理负责，例如在开发 Shell 中运行 `pi update git:github.com/L4nterns/pi-provider-gateway`。更新前自行协调正在使用该插件的 Pi，再按原生方式重新加载。
 
-`PI_OFFLINE=1` 时只使用已完整安装的副本，不宣称已获取最新；缺失或更新未完成时拒绝离线启动。成功安装后用户卸载插件不会被自动装回。已有同名本地包或显式固定 ref 的用户声明不会被自动替换，不做安装来源迁移；需要改用自动跟随来源时，先备份并用 Pi 原生包管理检查旧声明，再自行切换，不要覆盖配置、密钥、模型例外或历史。
+已有同名本地包不会被自动替换或再加载一份，不做安装来源迁移。需要改用 Git 安装时，先备份并用 Pi 原生包管理检查旧声明，再自行切换；不要覆盖配置、密钥、模型例外或历史。
 
 进入 Pi 后，使用 `/gateway` 配置 URL / Key，使用 `/model` 和 `/thinking` 选择模型与思考档位。网关扩展独立于 pic，配置和凭据保存在 `data/`。本轮实测的原生 `/login` 会明文回显 secret，网关密钥应走遮罩的 `/gateway login`。
 
 ## Pi 版本与更新
 
-**pic 不固定 Pi 版本。** 依赖跟随 npm 的 `latest` 发布标签；Docker 和开发测试均使用 `npm install --ignore-scripts --package-lock=false`，不交付根锁文件，项目 `.npmrc` 也关闭锁文件生成。Gateway 则跟随公开 Git 仓库最新分支，更新时机见上节；二者都不固定版本。
+**pic 不固定 Pi 版本。** 依赖跟随 npm 的 `latest` 发布标签；Docker 和开发测试均使用 `npm install --ignore-scripts --package-lock=false`，不交付根锁文件，项目 `.npmrc` 也关闭锁文件生成。Gateway 安装源同样不固定版本，但不因此改变首次安装与原生更新的职责分工。
 
 Docker 可能复用已有的依赖安装层，不代表每次普通构建都会重新下载。需要获取新 Pi 时，在「开发容器管理」选择「无缓存构建镜像」，再对空闲项目选择「重建当前项目容器」。安装从所选 npm registry 解析 `latest`，不是固定到某个版本号。
 
@@ -106,7 +106,7 @@ Pi 自己退出、容器 / 宿主重启或进程崩溃后，原执行状态已�
 | 位置 | 内容 |
 |---|---|
 | 项目目录 | 挂载为 `/workspace` 的开发文件 |
-| `data/` | Pi 配置、凭据、扩展、包初始化状态 / 生命周期租约，以及 `project-history/` 下按项目保存的对话 |
+| `data/` | Pi 配置、凭据、扩展，以及 `project-history/` 下按项目保存的对话 |
 | `.runtime/` | 宿主项目锁、终端连接租约 |
 | `.deploy-keys/`、`services-data/` | 可选部署身份和应用业务数据 |
 

@@ -7,14 +7,15 @@
 - 保留终端菜单、容器内 tmux 进程托管、开发 Shell、开发容器与独立服务容器管理。Gateway 独立维护于公开仓库，pic 不保留插件源码。
 - 职责收敛：pic 不封装 Pi 的新对话、历史选择、模型或插件操作；移除历史恢复分发与辅助程序模式。原生 Pi 命令不被覆盖，pic 只启动托管、接回和结束活进程。
 - 不保留旧命令别名、多词命令入口或旧版路径迁移兼容层。
-- Pi 不再固定版本：根依赖改为 npm `latest`，移除根锁文件，项目 `.npmrc` 禁用锁文件生成；Docker 与 CI 改用不生成锁文件的安装。插件通过公开 Git source 获取默认分支最新提交，不再记录固定版本、tag 或 SHA。
+- Pi 不再固定版本：根依赖改为 npm `latest`，移除根锁文件，项目 `.npmrc` 禁用锁文件生成；Docker 与 CI 改用不生成锁文件的安装。插件安装源同样不带版本、tag 或 SHA，但不因此改变首次安装机制。
+- 已撤回上轮额外引入的插件自动更新生命周期：删除自定义启动器、共享包锁 / 进程租约、pending 状态、就绪确认与更新失败启动拦截。开发入口、tmux 托管和相关 smoke / live 测试恢复为 `9d06d1b` 的内容，只对未固定安装源做必要调整。
 - 未修改宿主安装、实际配置、凭据、模型例外、历史或业务数据；未发布镜像、重建当前容器或操作真实服务。源码提交与推送不代表已部署。
 
 ## 自动检查
 
 Node.js 24.22.2，执行 `npm run check`：
 
-- CLI / 服务 / 生命周期 / 安装器 / 原生 Pi 对照 / tmux 测试共 **50 项：47 通过、3 跳过**。
+- CLI / 服务 / 生命周期 / 安装器 / 原生 Pi 对照 / tmux 测试共 **45 项：42 通过、3 跳过**。
 - Bash / POSIX sh 语法、ShellCheck 0.10.0、`git diff --check`：通过。
 - Python 3 未安装，Python AST 检查跳过；本次未修改 Python 源码。
 - 三项测试跳过分别需要 root 隔离 chroot、root + ACL、完整服务 rootfs；不把跳过算通过。
@@ -45,15 +46,13 @@ Node.js 24.22.2，执行 `npm run check`：
 
 ## 公开插件仓库与真正在线安装
 
-- 独立仓库 `L4nterns/pi-provider-gateway` 已确认 public；manifest 使用 `git:github.com/L4nterns/pi-provider-gateway`，无版本 / ref 字段。pic 不保留 `packages/` 目录，Dockerfile 不复制插件源码。
+- 独立仓库 `L4nterns/pi-provider-gateway` 已确认 public；manifest 使用 `git:github.com/L4nterns/pi-provider-gateway`，没有版本或 ref 字段。pic 不保留 `packages/` 目录，Dockerfile 不复制插件源码。
 - 使用不含真实凭据的临时 HOME/agent、空全局 Git 配置和禁用 credential helper 的环境，匿名 HTTPS 查询与原生 `pi install` 均成功，不依赖推送 token。
-- 运行实际 `scripts/bootstrap-pi.mjs` 从默认分支下载安装，再按同一 source 原生 `pi update`；校验 checkout 与公开分支 HEAD 一致。本轮实际解析到 `29cb83d435cce3481faf154f55e7d76fdb6a6557`，这是测试观测值，不是安装限制。未安装插件的 Pi peer 或开发依赖副本。
+- 运行实际 `scripts/bootstrap-pi.mjs` 首次安装，checkout 与当时公开默认分支 HEAD 一致；本轮解析到 `97ead2e6cf92c1e6d6c33223941092cc65b81695`，这是测试观测值而非安装限制。后续将临时 checkout 的 remote 改成不可访问地址再运行引导，仍成功且没有安装 / 更新输出，标记与设置字节不变；首次安装失败不写完成标记。未安装插件的 Pi peer 或开发依赖副本。
 - 用合成服务、合成密钥和缓存执行原生 Pi 离线模型列表，插件加载正常，模型注册成功；合成 auth.json 与模型覆盖字节不变，没有访问真实用户配置或调用付费模型。
-- 独立本地 Git remote + 真实 Pi CLI 回归：初次 clone 后向 remote 连续提交两次；后续引导自动前进到新提交，离线时保持已安装版本；远程不可用时明确失败、读就绪检查拒绝，恢复后重试成功。原生 settings、auth 与模型覆盖不被更新流程重写；fixture 的 postinstall 未执行。
-- 真实 `flock` + 合成 Pi 进程验证：首次并发启动只安装一次，进程整个存活期保留共享租约；一个 Pi 退出但另一个仍存活时继续延后更新，全部退出后的新启动才调用更新。该测试复用同一目录模拟共享 bind，不等于跨 Docker 集成已完成。
-- 真正 tmux 中验证：父启动器与新 pane 用就绪确认交接租约，断开后共享包锁仍被占用；结束进程释放租约。未就绪的插件启动明确失败，不返回成功或偷偷启动替代进程。
-- 接回、列表、Shell 不调用更新；更新失败不会热替换运行中的 Pi，也不会将半更新状态授权给新的并发进程。用户卸载不自动装回，用户已有本地包或显式 ref 不自动迁移。
-- 当前源码中已无本地分发路径与本地包安装分支；只保留通用在线安装 / 更新及对用户包声明的只读检查。没有重写既有 Git 历史，旧提交曾经分发的源码仍属于历史记录。
+- 再次引导离线成功、标记不变；通过原生 `pi remove` 卸载后再运行引导，不自动重新安装。下载失败重试、无效来源拒绝、已有同名本地包不替换，由隔离回归验证。
+- 回归确认 `scripts/run-pi.sh` 与自动更新专用测试已删除，入口和辅助程序不引用包锁、prepared/hosted 包装或 pending 状态；tmux 直接启动原生 `pi`。插件后续更新由原生 `pi update <source>` 负责，不在 pic 中重做更新策略。
+- 删除 pic 中的本地分发路径与本地包安装分支；只保留通用在线引导及不修改用户已有包的去重检查。没有重写既有 Git 历史，旧提交中曾经分发的源码仍属于历史记录。
 
 ## 原生 Pi 能力对照（不是 pic 功能）
 

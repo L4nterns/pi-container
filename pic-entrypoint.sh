@@ -27,6 +27,9 @@ if [ -d /run/deploy-credentials ]; then
         mv -fT "$temporary" "/run/pic-ssh/$name"
     done
 fi
+if [ "${1:-}" != '--dev-shell' ] && [ "${1:-}" != '--service-shell' ]; then
+    setpriv --reuid "$PIC_UID" --regid "$PIC_GID" --groups "$PIC_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all node /opt/pic/scripts/bootstrap-pi.mjs >&2
+fi
 flock -u 9; exec 9>&-
 if [ "${1:-}" = '--service-shell' ]; then
     shift
@@ -45,10 +48,7 @@ if [ "${1:-}" = '--dev-shell' ]; then
 fi
 if [ "${1:-}" = '--pic-session' ]; then
     shift
-    if [ "${1:-}" = start ]; then
-        exec setpriv --reuid "$PIC_UID" --regid "$PIC_GID" --groups "$PIC_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all bash /opt/pic/scripts/run-pi.sh --hosted "$@"
-    fi
     exec setpriv --reuid "$PIC_UID" --regid "$PIC_GID" --groups "$PIC_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all /usr/local/bin/pic-session "$@"
 fi
 if [ -r /run/pic-ssh/known_hosts ]; then set -- --skill /opt/pic/skills/app-deployment "$@"; fi
-exec setpriv --reuid "$PIC_UID" --regid "$PIC_GID" --groups "$PIC_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all bash /opt/pic/scripts/run-pi.sh "$@"
+exec setpriv --reuid "$PIC_UID" --regid "$PIC_GID" --groups "$PIC_GROUPS" --no-new-privs --inh-caps=-all --ambient-caps=-all --bounding-set=-all pi "$@"
