@@ -124,10 +124,14 @@ menu_key() {
     return 0
 }
 menu_select() (
-    local title=$1 saved rows cols visible first i index=${MENU_INDEX:-0} paste=0 error='' MENU_KEY MENU_CHAR MENU_TEXT MENU_WIDTH previous_cols
+    local title=$1 saved rows cols visible first i index=${MENU_INDEX:-0} context_first=0 context_visible=0 context_last=0 context_left=0 context_longest=0 paste=0 error='' MENU_KEY MENU_CHAR MENU_TEXT MENU_WIDTH previous_cols
     local LC_ALL=C.UTF-8
     shift
-    local -a items=("$@") frame=() previous_frame=()
+    local -a items=("$@") context=() frame=() previous_frame=()
+    if [[ -n "${MENU_CONTEXT:-}" ]]; then
+        mapfile -t context <<< "$MENU_CONTEXT"
+        for i in "${context[@]}"; do (( ${#i} <= context_longest )) || context_longest=${#i}; done
+    fi
     (( ${#items[@]} )) || return 1
     [[ "$index" =~ ^[0-9]+$ ]] && (( index < ${#items[@]} )) || index=0
     menu_tty_begin || return
@@ -145,6 +149,16 @@ menu_select() (
             menu_row "${items[i]}"
             if (( i == index )); then frame[i-first+2]=$'> \e[7m'"$MENU_TEXT"$'\e[0m'; else frame[i-first+2]="  $MENU_TEXT"; fi
         done
+        context_visible=$((rows - 5 - visible)); (( context_visible >= 0 )) || context_visible=0
+        context_last=$((${#context[@]} - context_visible)); (( context_last >= 0 )) || context_last=0
+        (( context_first <= context_last )) || context_first=$context_last
+        if (( ${#context[@]} && context_visible )); then
+            for ((i=0; i<context_visible && i+context_first<${#context[@]}; i++)); do
+                menu_clip "${context[i+context_first]:context_left}" "$((cols - 1))"; frame[i+visible+3]=$MENU_TEXT
+            done
+            menu_clip "「Esc」${MENU_ESCAPE_LABEL:-返回} · 「↑/↓」选择 · 「Enter」确认 · 「PgUp/PgDn」查看清单 $((context_first + 1)) / ${#context[@]} · 「←/→」长行" "$((cols - 1))"
+            frame[rows-1]=$MENU_TEXT
+        fi
         menu_paint
     }
     trap 'menu_draw || exit 1' WINCH
@@ -154,8 +168,14 @@ menu_select() (
             up) index=$(((index + ${#items[@]} - 1) % ${#items[@]})) ;;
             down) index=$(((index + 1) % ${#items[@]})) ;;
             home) index=0 ;; end) index=$((${#items[@]} - 1)) ;;
-            pageup) index=$((index - visible)); (( index >= 0 )) || index=0 ;;
-            pagedown) index=$((index + visible)); (( index < ${#items[@]} )) || index=$((${#items[@]} - 1)) ;;
+            pageup)
+                if (( ${#context[@]} )); then context_first=$((context_first - context_visible)); (( context_first >= 0 )) || context_first=0
+                else index=$((index - visible)); (( index >= 0 )) || index=0; fi ;;
+            pagedown)
+                if (( ${#context[@]} )); then context_first=$((context_first + context_visible))
+                else index=$((index + visible)); (( index < ${#items[@]} )) || index=$((${#items[@]} - 1)); fi ;;
+            left) (( context_left < 8 )) && context_left=0 || context_left=$((context_left - 8)) ;;
+            right) (( ! ${#context[@]} || context_left + 8 >= context_longest )) || context_left=$((context_left + 8)) ;;
             enter) printf '%s\n' "$index"; return 0 ;;
             escape) return 1 ;;
             *) continue ;;

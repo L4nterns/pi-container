@@ -9,6 +9,7 @@ services-data/
 .runtime/
 .deploy-keys/
 .services.lock
+.update.lock
 node_modules/
 workspace/
 .git/

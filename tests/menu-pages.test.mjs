@@ -57,6 +57,16 @@ test('output pages ignore Enter, page through diagnostics and return with a sing
   assert(!out.includes('\ufffd'));
 });
 
+test('confirmation displays a paged session list without changing the default-cancel selection', async t => {
+  const f = await fixture(t, 'choice=$(MENU_INDEX=0 MENU_CONTEXT="$(<"$2")" menu_select "确认操作" "取消" "确认"); result=$?; printf "CHOICE:%s\\n" "$choice"; (exit "$result")');
+  await f.wait('LINE-1'); await f.wait('「PgUp/PgDn」查看清单');
+  f.proc.write('\x1b[6~'); await f.wait('LINE-4');
+  const out = await f.finish('\r');
+  assert.match(out, /CHOICE:0/); assert(!out.includes('\x1b[2J'));
+  const cancel = await fixture(t, 'MENU_CONTEXT="$(<"$2")" menu_select "确认操作" "取消" "确认"');
+  await cancel.wait('LINE-1'); await cancel.finish('\x1b', 1);
+});
+
 test('build input isolates pasted newlines and restores the TTY on confirmation or cancellation', async t => {
   const f = await fixture(t, 'value=$(menu_input "构建镜像" "KEY=value"); result=$?; printf "VALUE:%s\\n" "$value"; (exit "$result")');
   await f.wait('「Enter」下一项');

@@ -12,6 +12,7 @@ const select = index => home + down.repeat(index) + "\r";
 const exitMenu = esc;
 const menuHint = "「↑/↓」选择 · 「Enter」确认";
 const menus = (...inputs) => inputs.map(keys => [menuHint, keys]);
+const mutations = calls => calls.filter(c => c.args.some(a => ['up', 'build', 'stop', 'down', 'rm', 'prune', '--pic-session', 'close'].includes(a)));
 const pause = ['「PgUp/PgDn」翻页', esc];
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const hostKey =
@@ -37,6 +38,8 @@ async function fixture(t) {
     "lib/menu.sh",
     "lib/session-lifecycle.sh",
     "lib/deployment.sh",
+    "lib/update.sh",
+    "lib/idle.sh",
     "compose.yaml",
     "compose.deploy.yaml",
     "compose.services.yaml",
@@ -79,6 +82,7 @@ else if(args.includes('/usr/local/bin/pic-workspace-init'))process.exitCode=Numb
 else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='count'){if(selected?.countError||process.env.FAKE_COUNT_ERROR)process.exitCode=1;else console.log(selected?.live??process.env.FAKE_LIVE_PI??'0');}
 else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='list'){if(process.env.FAKE_LIST_ERROR)process.exitCode=1;else process.stdout.write(process.env.FAKE_RUNNING||'');}
 else if(args.includes('logs'))console.log(process.env.FAKE_LOG_OUTPUT||'startup ready\\napplication error: synthetic diagnostic');
+else if(args[0]==='ps'&&args.some(a=>a.startsWith('label=io.pi-container.'))){}
 else if(args[0]==='ps'&&args.includes('-aq')){if(process.env.FAKE_MANAGED_ERROR)process.exitCode=73;else if(managed.length)for(const c of managed){if((!c.workingDir||args.includes('label=com.docker.compose.project.working_dir='+c.workingDir))&&(!c.service||args.includes('label=com.docker.compose.service='+c.service)))console.log(c.id);}else if(process.env.FAKE_MANAGED)console.log('managed-container');}
 else if(args.includes('ps')&&!args.includes('-q')&&!args.includes('-aq'))console.log('SERVICE  STATE    STATUS\\n'+(args.includes('services')?'services':'pi')+'       running  Up');
 else if(args.includes('ps')&&(args.includes('-q')||args.includes('-aq'))){if(process.env.FAKE_PS_ERROR)process.exitCode=73;else if(projectContainer){if(!args.includes('-q')||projectContainer.state!=='exited')console.log(projectContainer.id);}else if(process.env.FAKE_NO_CONTAINER!=='1'&&(!args.includes('-q')||process.env.FAKE_CONTAINER_STATE!=='exited'))console.log('fake-container');}
@@ -238,14 +242,14 @@ test('batch development cleanup respects a real host terminal lease', async t =>
 
 test('development bulk maintenance is explicit in the menu and cleanup defaults to cancel', async t => {
   const f = await fixture(t), env = { FAKE_MANAGED: '1' };
-  const listed = await f.menu([...menus(select(3), select(8)), pause, ...menus(esc, esc)], env);
+  const listed = await f.menu([...menus(select(3), select(5)), pause, ...menus(esc, esc)], env);
   assert.equal(listed.exitCode, 0, listed.output);
   assert(listed.output.includes(f.project)); assert.match(listed.output, /查看全部/);
   assert(!listed.calls.some(c => c.args.includes('down')));
-  const cancelled = await f.menu(menus(select(3), select(9), '\r', esc, esc), env);
-  assert.equal(cancelled.exitCode, 0, cancelled.output); assert.deepEqual(cancelled.calls, []);
-  assert.match(cancelled.output, /占用或状态未知的不删/);
-  const confirmed = await f.menu([...menus(select(3), select(9), select(1)), pause, ...menus(esc, esc)], env);
+  const cancelled = await f.menu(menus(select(3), select(6), '\r', esc, esc), env);
+  assert.equal(cancelled.exitCode, 0, cancelled.output); assert.deepEqual(mutations(cancelled.calls), []);
+  assert.match(cancelled.output, /中断后清理全部/);
+  const confirmed = await f.menu([...menus(select(3), select(6), select(1)), pause, ...menus(esc, esc)], env);
   assert.equal(confirmed.exitCode, 0, confirmed.output);
   assert.equal(confirmed.calls.filter(c => c.args.includes('down')).length, 1);
 });
@@ -328,7 +332,7 @@ test("installed pc and pi-container links coexist with system groff pic", async 
   assert(!output.includes("groff-pic-sentinel"));
   assert.equal(await fs.readFile(groff, "utf8"), original);
   assert.equal((await fs.stat(groff)).mode & 0o777, originalMode);
-  assert.deepEqual(await f.calls(), []);
+  assert.deepEqual(mutations(await f.calls()), []);
 });
 test("pi-container menu owns hosted processes, not native Pi conversation commands", async (t) => {
   const f = await fixture(t);
@@ -341,7 +345,7 @@ test("pi-container menu owns hosted processes, not native Pi conversation comman
   assert.match(r.output, /接回 Pi.*继续原进程/);
   assert.match(r.output, /启动 Pi.*断开终端后继续运行/);
   assert.match(r.output, /结束 Pi.*停止进程/);
-  assert.deepEqual(r.calls, []);
+  assert.deepEqual(mutations(r.calls), []);
 });
 test("menu connects selected live process, never creates a replacement or resumes history", async (t) => {
   const f = await fixture(t);
@@ -396,13 +400,13 @@ test("process selection and termination can be cancelled; termination requires c
 });
 test("arrow menus cover service management, default-cancel confirmation and Escape without number shortcuts", async t => {
   const f = await fixture(t);
-  const cancelled = await f.menu(menus(select(4), select(7), '\r', esc, esc), { DEPLOY_DATA_DIR: './services-data' });
+  const cancelled = await f.menu(menus(select(4), select(4), '\r', esc, esc), { DEPLOY_DATA_DIR: './services-data' });
   assert.equal(cancelled.exitCode, 0, cancelled.output);
-  assert.deepEqual(cancelled.calls, [], 'confirmation defaults to cancel; Escape returns without a side effect');
+  assert.deepEqual(mutations(cancelled.calls), [], 'confirmation defaults to cancel; read-only status probes are allowed');
   const state = await f.menu([...menus(select(4), select(0)), pause, ...menus(esc, esc)], { DEPLOY_DATA_DIR: './services-data' });
   assert.equal(state.exitCode, 0, state.output);
   assert(state.calls.some(c => c.args.includes('ps')));
-  const restored = await f.menu(menus(select(4), select(7), select(1), esc, esc), { DEPLOY_DATA_DIR: './services-data' });
+  const restored = await f.menu(menus(select(4), select(4), select(1), esc, esc), { DEPLOY_DATA_DIR: './services-data' });
   assert(restored.calls.some(c => c.args.includes('stop') && c.args.includes('services')));
   const second = await f.menu(menus(select(0), select(1)), { FAKE_RUNNING: 'first\t0\t1700000000\nsecond\t0\t1700000001\n' });
   assert(second.calls.some(c => c.args.slice(-3).join('|') === '/usr/local/bin/pic-session|attach|second'));
@@ -468,7 +472,7 @@ test("reattachment does not provision services, parse publishing config or initi
   await assert.rejects(fs.access(path.join(f.tool, ".deploy-keys/installation")));
   const projects = await fs.readdir(path.join(f.tool, ".runtime"));
   assert.equal(projects.length, 1);
-  assert.deepEqual(await fs.readdir(path.join(f.tool, ".runtime", projects[0])), ["lifecycle.lock"], "ordinary terminal lease is released after attach exits");
+  assert.deepEqual((await fs.readdir(path.join(f.tool, ".runtime", projects[0]))).filter(name => name.startsWith('session.')), [], "ordinary terminal lease is released after attach exits");
 });
 test("missing or unreadable existing container never causes a reattachment startup", async (t) => {
   const f = await fixture(t);
@@ -523,14 +527,12 @@ test("image builds explain the explicit replacement step without recreating cont
     assert.equal(r.calls.length, 1);
     assert(r.calls[0].args.includes("build"));
     assert.equal(r.calls[0].args.includes("--no-cache"), action === "dev-rebuild");
-    assert.match(r.stdout, /镜像构建完成.*重建容器.*现有容器仍使用原镜像/);
+    assert.match(r.stdout, /镜像构建完成.*检查更新.*现有容器仍使用原镜像/);
   }
-  const menu = await f.menu([...menus(select(3), select(4)), ['「Enter」下一项／空行开始', '\r'], pause, ...menus(esc, exitMenu)]);
+  const menu = await f.menu(menus(select(3), esc, esc));
   assert.equal(menu.exitCode, 0, menu.output);
-  assert.match(menu.output, /重建容器.*使用已构建镜像/);
-  assert.match(menu.output, /镜像构建完成/);
-  assert.equal(menu.calls.length, 1);
-  assert(menu.calls[0].args.includes("--no-cache"));
+  assert.doesNotMatch(menu.output, /使用已构建镜像|无缓存构建|构建参数|> .*重建容器/);
+  assert.deepEqual(mutations(menu.calls), []);
   const failed = await f.run(["dev-rebuild"], { FAKE_BUILD_EXIT: "74" });
   assert.equal(failed.status, 74);
   assert.doesNotMatch(failed.stdout, /镜像构建完成/);
@@ -734,11 +736,11 @@ test("Pi follows npm latest without an exact version or project lockfile", async
 test('menu positions survive operations and submenu returns only in the current invocation', async t => {
   const f = await fixture(t);
   const r = await f.menu([
-    ...menus(select(3), select(4)), ['「Enter」下一项／空行开始', '\r'], pause,
-    ...menus(esc, '\r', '\r'), ['「Enter」下一项／空行开始', '\r'], pause, ...menus(esc, exitMenu),
+    ...menus(select(3), select(2)), pause,
+    ...menus(esc, '\r', '\r'), pause, ...menus(esc, exitMenu),
   ]);
   assert.equal(r.exitCode, 0, r.output);
-  assert.equal(r.calls.filter(c => c.args.includes('build') && c.args.includes('--no-cache')).length, 2, 'main and dev positions are retained');
+  assert.equal(r.calls.filter(c => c.args.includes('logs')).length, 2, 'main and dev positions are retained');
   const fresh = await f.menu(menus('\r', esc, exitMenu), { FAKE_RUNNING: 'main\t0\t1700000000\n' });
   assert(fresh.calls.some(c => c.args.at(-1) === 'list'), 'a fresh invocation starts at the first real action, Attach');
 });
@@ -747,7 +749,7 @@ test('app autostart menu is persistent-policy-only and defaults to cancel', asyn
   const f = await fixture(t), revision = 'a'.repeat(64);
   const env = { DEPLOY_DATA_DIR: './services-data', FAKE_APPS: `demo\ttrue\t${revision}\n` };
   const r = await f.menu([
-    ...menus(select(4), select(9), select(0), select(1), select(1), esc, esc, esc),
+    ...menus(select(4), select(6), select(0), select(1), select(1), esc, esc, esc),
   ], env);
   assert.equal(r.exitCode, 0, r.output);
   const set = r.calls.find(c => c.args.includes('/usr/local/bin/deploy-apps') && c.args.includes('set'));
@@ -755,14 +757,14 @@ test('app autostart menu is persistent-policy-only and defaults to cancel', asyn
   assert.match(r.output, /不.*当前进程|当前进程不变/);
   assert(!r.calls.some(c => c.args.some(arg => ['up', 'run', 'start', 'stop', 'restart', 'update', 'reread'].includes(arg))));
   await assert.rejects(fs.access(path.join(f.tool, 'services-data')), { code: 'ENOENT' });
-  const cancel = await f.menu(menus(select(4), select(9), select(0), select(1), '\r', esc, esc, esc), env);
+  const cancel = await f.menu(menus(select(4), select(6), select(0), select(1), '\r', esc, esc, esc), env);
   assert(!cancel.calls.some(c => c.args.includes('set')));
 });
 
 test('app policy query errors and missing service stay visible and never start a container', async t => {
   const f = await fixture(t);
   for (const [extra, message] of [[{ FAKE_NO_CONTAINER: '1' }, /服务容器未运行.*未自动启动或修改应用/], [{ FAKE_APP_ERROR: '1' }, /「读取失败」请检查服务容器/], [{ FAKE_APPS: 'invalid\n' }, /格式错误/]]) {
-    const r = await f.menu([...menus(select(4), select(9)), pause, ...menus(esc, esc)], { DEPLOY_DATA_DIR: './services-data', ...extra });
+    const r = await f.menu([...menus(select(4), select(6)), pause, ...menus(esc, esc)], { DEPLOY_DATA_DIR: './services-data', ...extra });
     assert.equal(r.exitCode, 0, r.output);
     assert(!r.calls.some(c => c.args.includes('up') || c.args.includes('set')));
     assert.match(r.output, message);
@@ -795,7 +797,7 @@ test('all menus omit navigation items, align action columns, and place Esc first
   const f = await fixture(t);
   const r = await f.menu(menus(select(3), esc, select(4), esc, exitMenu));
   assert.equal(r.exitCode, 0, r.output);
-  const common = ['查看状态', '管理终端', '查看日志', '构建镜像', '无缓存构建', '重建容器', '停止容器', '删除容器'];
+  const common = ['查看状态', '管理终端', '查看日志', '停止容器', '删除容器'];
   const screens = r.output.split('\x1b[?25l\x1b[?2004h');
   for (const kind of ['开发容器', '服务容器']) {
     const frame = screens.find(s => s.includes(`\x1b[1m${kind}\x1b[0m`));
@@ -816,7 +818,7 @@ test('all menus omit navigation items, align action columns, and place Esc first
   assert.match(r.output, /开发容器/); assert.match(r.output, /查看全部/); assert.match(r.output, /清理空闲/);
   assert.equal((r.output.match(/\x1b\[\?1049h/g) || []).length, 1);
   assert.equal((r.output.match(/\x1b\[\?1049l/g) || []).length, 1);
-  assert.deepEqual(r.calls, []);
+  assert.deepEqual(mutations(r.calls), []);
 });
 
 test('status, logs, builds and errors remain in one exclusive screen until Esc returns', async t => {
@@ -824,7 +826,6 @@ test('status, logs, builds and errors remain in one exclusive screen until Esc r
   const r = await f.menu([
     ...menus(select(3), select(0)), pause,
     ...menus(select(2)), pause,
-    ...menus(select(3)), ['「Enter」下一项／空行开始', '\r'], pause,
     ...menus(esc, select(0)), pause, ...menus(exitMenu),
   ], { FAKE_LIST_ERROR: '1' });
   assert.equal(r.exitCode, 0, r.output);
@@ -873,27 +874,14 @@ test('both containers use readable state and prefix-free bounded logs without st
   }
 });
 
-test('build forms cancel without Docker and use identical optional arguments for both images', async t => {
+test('manual image build and container recreation forms are absent from both menus', async t => {
   const f = await fixture(t);
-  for (const [entry, kind] of [[3, 'dev'], [4, 'service']]) {
-    const cancelled = await f.menu([...menus(select(entry), select(3)), ['「Enter」下一项／空行开始', esc], ...menus(esc, esc)]);
-    assert.deepEqual(cancelled.calls, []);
-    const built = await f.menu([
-      ...menus(select(entry), select(4)), ['「Enter」下一项／空行开始', 'OPTION=value\r'],
-      ['「Enter」下一项／空行开始', '\r'], pause, ...menus(esc, esc),
-    ], { DEPLOY_DATA_DIR: './services-data' });
-    assert.equal(built.exitCode, 0, built.output);
-    const call = built.calls.find(c => c.args.includes('build'));
-    assert.deepEqual(call.args.slice(-5), ['build', '--no-cache', '--build-arg', 'OPTION=value', kind === 'dev' ? 'pi' : 'services']);
-    assert(!built.calls.some(c => c.args.some(a => ['up', '--force-recreate', 'install', 'update'].includes(a))));
+  for (const entry of [3, 4]) {
+    const r = await f.menu(menus(select(entry), esc, esc));
+    assert.equal(r.exitCode, 0, r.output);
+    assert.doesNotMatch(r.output, /使用缓存|无缓存构建|构建参数|使用已构建镜像/);
+    assert.deepEqual(mutations(r.calls), []);
   }
-  const temporary = path.join(f.root, 'output-tmp'); await fs.mkdir(temporary);
-  const failed = await f.menu([
-    ...menus(select(3), select(3)), ['「Enter」下一项／空行开始', '\r'], pause, ...menus(esc, esc),
-  ], { TMPDIR: temporary, FAKE_BUILD_EXIT: '74' });
-  assert.match(failed.output, /操作失败.*退出码：74/);
-  assert.doesNotMatch(failed.output, /镜像构建完成|「已完成」/);
-  assert.deepEqual(await fs.readdir(temporary), [], 'private output files are removed after a failed operation');
 });
 
 test("host root directory is never a project bind", async (t) => {

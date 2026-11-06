@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Private operation dispatcher for the terminal menu.
 # Not a public CLI; pc and pi-container both open bin/pi-container.
+# Maintenance intentionally isolates exported state in subshells.
+# shellcheck disable=SC2031
 set -euo pipefail
 SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
 REPO=$(cd -- "$(dirname -- "$SCRIPT")/.." && pwd -P)
@@ -8,6 +10,10 @@ REPO=$(cd -- "$(dirname -- "$SCRIPT")/.." && pwd -P)
 source "$REPO/lib/session-lifecycle.sh"
 # shellcheck source=lib/deployment.sh
 source "$REPO/lib/deployment.sh"
+# shellcheck source=lib/update.sh
+source "$REPO/lib/update.sh"
+# shellcheck source=lib/idle.sh
+source "$REPO/lib/idle.sh"
 WORKDIR=$(pwd -P)
 UID_VALUE=$(id -u)
 HASH=$(printf '%s' "$WORKDIR" | sha256sum | cut -c1-16)
@@ -28,15 +34,22 @@ TERMINAL_ENV=(--env "TERM=${TERM:-dumb}" --env "COLORTERM=${COLORTERM:-}" --env 
 require_existing_container() {
     cid=$("${CURRENT[@]}" ps -q pi) || return
     if [[ -z "$cid" ]]; then printf '当前项目的开发容器不在运行，不能接回 Pi。\n' >&2; return 1; fi
+    SESSION_CONTAINER_ID=$cid
 }
 compose_stop_if_idle() {
     local cid exec_count
     cid=$("${CURRENT[@]}" ps -q pi 2>/dev/null) || return 0
     [[ -n "$cid" ]] || return 0
+    [[ -z "${SESSION_CONTAINER_ID:-}" || "$cid" == "$SESSION_CONTAINER_ID" ]] || return 0
     exec_count=$(docker inspect --format '{{len .ExecIDs}}' "$cid" 2>/dev/null) || return 0
     if [[ "$exec_count" == 0 ]] && require_no_live_pi >/dev/null 2>&1; then "${CURRENT[@]}" stop pi >&2 || true; fi
 }
-finish_session() { local status=$?; trap - EXIT; session_finish compose_stop_if_idle; exit "$status"; }
+finish_session() {
+    local status=$?; trap - EXIT
+    if pc_operation_lock try; then session_finish compose_stop_if_idle
+    else session_release_lease; fi
+    exit "$status"
+}
 managed_projects() {
     local ids id name
     ids=$(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$REPO" --filter 'label=com.docker.compose.service=pi') || return
@@ -71,10 +84,12 @@ status_table() {
 }
 require_no_live_pi() {
     local cid count
-    cid=$("${CURRENT[@]}" ps -q pi) || return
+    # Explicit return codes are essential here: Bash's bare return inside an
+    # EXIT trap can reuse the pre-trap (successful) status on a failed query.
+    cid=$("${CURRENT[@]}" ps -q pi) || return "$?"
     [[ -n "$cid" ]] || return 0
     # No old-image fallback: missing helper is an error, never proof of idleness.
-    count=$(docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session count) || return
+    count=$(docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session count) || return "$?"
     [[ "$count" =~ ^[0-9]+$ ]] || { printf '无法确认运行中 Pi 的状态；拒绝继续。\n' >&2; return 1; }
     if [[ "$count" != 0 ]]; then printf '仍有 %s 个 Pi 进程在运行。请在 pi-container 菜单中接回或结束它们。\n' "$count" >&2; return 1; fi
 }
@@ -89,7 +104,30 @@ idle_action() {
     "$@"
 }
 action=${1:-}; [[ -n "$action" ]] || invalid; shift
+confirmed=false
 case "$action" in
+    dev-stop|dev-remove|dev-remove-all)
+        if [[ "${1:-}" == --confirmed-interruption ]]; then confirmed=true; shift; fi ;;
+esac
+case "$action" in
+    tool-check|tool-plan|tool-remove-plan|tool-install-state|tool-runtime-ready|tool-install|tool-uninstall|dev-activity|dev-all-activity|service-activity)
+        (( $# == 0 )) || invalid
+        case "$action" in
+            tool-check) pc_update_check ;;
+            tool-plan) pc_update_inventory ;;
+            tool-remove-plan) pc_update_inventory loose ;;
+            tool-install-state) pc_install_state ;;
+            tool-runtime-ready) pc_runtime_ready ;;
+            service-activity) pc_service_activity ;;
+            tool-install) pc_install ;;
+            tool-uninstall) pc_uninstall ;;
+            dev-activity) pc_current_activity ;;
+            dev-all-activity) pc_update_inventory dev ;;
+        esac
+        exit 0 ;;
+    tool-update)
+        if (( $# != 3 )) || [[ ! "$1" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ || ! "$2" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ || ! "$3" =~ ^(standard|backup)$ ]]; then invalid; fi
+        pc_update_apply "$@"; exit 0 ;;
     dev-list)
         (( $# == 0 )) || invalid
         projects=$(managed_projects | sort -u)
@@ -116,7 +154,7 @@ case "$action" in
             current=$(docker inspect --format '{{.Image}}' "$cid")
             if [[ -z "$built" ]]; then printf '项目镜像：尚未构建或无法确认\n'
             elif [[ "$current" == "$built" ]]; then printf '项目镜像：已是当前构建\n'
-            else printf '项目镜像：有新构建，选择「重建容器」应用\n'; fi
+            else printf '项目镜像：有新构建，选择「检查更新」统一应用\n'; fi
         elif [[ -n "$built" ]]; then printf '项目镜像：已构建，启动 Pi 或管理终端时创建容器\n'
         else printf '项目镜像：尚未构建或无法确认\n'; fi
         if [[ -n "$running" ]]; then
@@ -133,15 +171,23 @@ case "$action" in
         if [[ "$action" == pi-end ]]; then
             if (( $# != 1 )) || [[ ! "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ ]]; then invalid; fi
         else (( $# == 0 )) || invalid; fi
+        [[ "$action" != pi-end ]] || pc_operation_lock
         init_lifecycle; session_lifecycle_lock
         cid=$("${CURRENT[@]}" ps -q pi)
         if [[ -z "$cid" ]]; then [[ "$action" == pi-running ]] && exit 0; printf '没有运行中的 Pi。\n' >&2; exit 1; fi
         if [[ "$action" == pi-running ]]; then
             docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session list
-        else docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session close "$1"; fi
-        session_lifecycle_unlock; exit 0 ;;
+        else
+            docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session close "$1"
+            remaining=$(session_active_count) || remaining=unknown
+            [[ "$remaining" != 0 ]] || compose_stop_if_idle
+        fi
+        session_lifecycle_unlock
+        if [[ "$action" == pi-end ]]; then SESSION_CONTAINER_ID=$cid; pc_idle_monitor_start; fi
+        exit 0 ;;
     dev-remove-all)
         (( $# == 0 )) || invalid
+        pc_operation_lock
         projects=$(managed_projects | sort -u); status=0
         if [[ -z "$projects" ]]; then printf '「暂无开发容器」本安装、当前用户。\n'; fi
         while IFS= read -r name; do
@@ -152,19 +198,30 @@ case "$action" in
             directory=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}' "$cid") || { status=1; continue; }
             printf '项目（宿主路径）：%s\n' "${directory:-未确认}"
             session_lifecycle_init "$REPO/.runtime/$name" || { printf '无法准备维护锁；未删除此容器。\n' >&2; status=1; continue; }
-            session_require_idle idle_action "${CURRENT[@]}" down --remove-orphans || status=1
+            if [[ "$confirmed" == true ]]; then
+                session_lifecycle_lock
+                "${CURRENT[@]}" down --remove-orphans || status=1
+                session_lifecycle_unlock
+            else session_require_idle idle_action "${CURRENT[@]}" down --remove-orphans || status=1; fi
         done <<< "$projects"
         exit "$status" ;;
     dev-remove|dev-stop)
         (( $# == 0 )) || invalid
+        pc_operation_lock
         init_lifecycle
-        if [[ "$action" == dev-stop ]]; then session_require_idle idle_action "${CURRENT[@]}" stop pi
+        if [[ "$confirmed" == true ]]; then
+            session_lifecycle_lock
+            if [[ "$action" == dev-stop ]]; then "${CURRENT[@]}" stop pi
+            else "${CURRENT[@]}" down --remove-orphans; fi
+            session_lifecycle_unlock
+        elif [[ "$action" == dev-stop ]]; then session_require_idle idle_action "${CURRENT[@]}" stop pi
         else session_require_idle idle_action "${CURRENT[@]}" down --remove-orphans; fi
         exit 0 ;;
     dev-build|dev-rebuild)
+        pc_operation_lock
         build_flags=(); [[ "$action" != dev-rebuild ]] || build_flags+=(--no-cache)
         "${CURRENT[@]}" build "${build_flags[@]}" "$@" pi
-        printf '「镜像构建完成」选择「重建容器」应用；现有容器仍使用原镜像。\n'
+        printf '「镜像构建完成」请通过「检查更新」统一应用；现有容器仍使用原镜像。\n'
         exit 0 ;;
     pi-start|pi-connect)
         if (( $# > 1 )) || { (( $# == 1 )) && [[ ! "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ ]]; }; then invalid; fi
@@ -178,12 +235,15 @@ case "$action" in
     service-start|service-stop|service-remove|service-state|service-logs|service-recreate) (( $# == 0 )) || invalid ;;
     *) invalid ;;
 esac
-if [[ "$WORKDIR" == / && "$action" != service-* ]]; then printf '拒绝将宿主机根目录 / 挂载为工作区；请进入具体项目目录。\n' >&2; exit 2; fi
+case "$action" in service-state|service-logs|service-app-list) ;; *) pc_operation_lock ;; esac
+if [[ "$WORKDIR" == / && "$action" != service-* ]]; then printf '拒绝将宿主机根目录 / 挂载为工作区;请进入具体项目目录。\n' >&2; exit 2; fi
 if [[ "$action" == pi-connect ]]; then
     # Attach to the existing process only: no Compose up, deployment setup,
     # credential staging or package bootstrap. Keep the ordinary terminal lease.
     init_lifecycle; trap finish_session EXIT
     session_start require_existing_container
+    pc_idle_monitor_start
+    pc_operation_unlock
     tty_flags=(-i); [[ ! -t 0 || ! -t 1 ]] || tty_flags=(-it)
     docker exec "${tty_flags[@]}" "${TERMINAL_ENV[@]}" --user "$PIC_UID:$PIC_GID" --workdir /workspace \
         "$cid" /usr/local/bin/pic-session attach "$1"
@@ -194,8 +254,10 @@ COMPOSE=(docker compose --project-directory "$REPO" --project-name "$PROJECT" --
 deployment_config
 if [[ "$action" == service-shell ]]; then
     provision_deployment; tty_flags=(); [[ ! -t 0 || ! -t 1 ]] || tty_flags=(-it)
+    pc_operation_unlock
     (( ${#tty_flags[@]} )) || tty_flags=(-i)
     docker run --rm --init --pull never "${tty_flags[@]}" "${TERMINAL_ENV[@]}" --security-opt no-new-privileges --network "$DEPLOY_NETWORK" \
+        --label "io.pi-container.installation=$REPO_HASH" --label "io.pi-container.user=$UID_VALUE" --label io.pi-container.role=service-terminal \
         --mount "type=bind,source=$DEPLOY_CREDENTIAL_DIR,target=/run/deploy-credentials,readonly" \
         --tmpfs /run/pic-ssh:rw,noexec,nosuid,nodev,mode=0700 \
         --env "PIC_UID=$PIC_UID" --env "PIC_GID=$PIC_GID" --env "PIC_GROUPS=$PIC_GROUPS" \
@@ -205,7 +267,7 @@ fi
 if [[ "$action" == service-* ]]; then
     deployment_require_config; exec {services_fd}>>"$REPO/.services.lock"; flock -x "$services_fd"
     case "$action" in
-        service-start) deployment_prepare_data; "${SERVICE_COMPOSE[@]}" up -d --wait --no-recreate services ;;
+        service-start) deployment_prepare_data; "${SERVICE_COMPOSE[@]}" up -d --wait --no-recreate --no-build services ;;
         service-stop) "${SERVICE_COMPOSE[@]}" stop services ;;
         service-remove) "${SERVICE_COMPOSE[@]}" down --remove-orphans ;;
         service-state)
@@ -218,7 +280,7 @@ if [[ "$action" == service-* ]]; then
         service-build|service-rebuild)
             build_flags=(); [[ "$action" != service-rebuild ]] || build_flags+=(--no-cache)
             "${SERVICE_COMPOSE[@]}" build "${build_flags[@]}" "$@" services
-            printf '「镜像构建完成」选择「重建容器」应用；现有容器仍使用原镜像。\n' ;;
+            printf '「镜像构建完成」请通过「检查更新」统一应用；现有容器仍使用原镜像。\n' ;;
         service-recreate) deployment_prepare_data; "${SERVICE_COMPOSE[@]}" up -d --wait --force-recreate --no-build services ;;
         service-app-list|service-app-set)
             cid=$("${SERVICE_COMPOSE[@]}" ps -q services)
@@ -233,13 +295,16 @@ deployment_require_workspace
 mkdir -p -- "$REPO/data"; init_lifecycle
 EXEC_TTY=(); [[ -t 0 && -t 1 ]] || EXEC_TTY=(-T)
 compose_start() {
-    "${COMPOSE[@]}" up -d --no-recreate pi >&2 || return
+    "${COMPOSE[@]}" up -d --no-recreate --no-build pi >&2 || return
     if [[ "$UID_VALUE" == 0 ]]; then "${COMPOSE[@]}" exec -T pi /usr/local/bin/pic-workspace-init "$PIC_UID" >&2 || return; fi
+    SESSION_CONTAINER_ID=$("${COMPOSE[@]}" ps -q pi)
 }
 if [[ "$action" == dev-recreate ]]; then
     session_require_idle idle_action "${COMPOSE[@]}" up -d --force-recreate --no-build pi
 else
     trap finish_session EXIT; session_start compose_start
+    pc_idle_monitor_start
+    pc_operation_unlock
     case "$action" in
         dev-shell) "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" "${TERMINAL_ENV[@]}" --workdir /workspace pi /usr/local/bin/pic-entrypoint --dev-shell "$@" ;;
         pi-start) "${COMPOSE[@]}" exec "${EXEC_TTY[@]}" "${TERMINAL_ENV[@]}" --workdir /workspace pi /usr/local/bin/pic-entrypoint --pic-session start "$@" ;;

@@ -29,7 +29,7 @@ deployment_require_workspace() {
     local protected
     # A project bind mount must never expose shared credentials or service data.
     # Check even when publishing is disabled and before creating any directories.
-    for protected in "$REPO/data" "$REPO/.deploy-keys" "$REPO/.runtime" "$REPO/services-data" "$REPO/.env" "$DEPLOY_DATA_DIR"; do
+    for protected in "$REPO/data" "$REPO/.deploy-keys" "$REPO/.runtime" "$REPO/services-data" "$REPO/.env" "$REPO/.update.lock" "$DEPLOY_DATA_DIR"; do
         [[ -n "$protected" ]] || continue
         protected=$(realpath -m -- "$protected") || return
         if [[ "$WORKDIR" == "$protected" || "$WORKDIR" == "$protected/"* || "$protected" == "$WORKDIR/"* ]]; then
@@ -78,7 +78,7 @@ provision_deployment() {
     # maintenance from another project. Release it before any long Pi session.
     exec {service_fd}>>"$REPO/.services.lock"
     flock -x "$service_fd"
-    "${SERVICE_COMPOSE[@]}" up -d --wait --no-recreate services >&2
+    "${SERVICE_COMPOSE[@]}" up -d --wait --no-recreate --no-build services >&2
     host_key=$("${SERVICE_COMPOSE[@]}" exec -T services /usr/local/bin/deploy-register \
         "$(<"$credentials/id_ed25519.pub")")
     if [[ ! "$host_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/]+={0,2}$ ]]; then

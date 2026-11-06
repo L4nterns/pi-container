@@ -9,6 +9,9 @@ help_text() {
         '  启动 Pi：在容器内托管，断开终端后继续运行。' \
         '  结束 Pi：停止进程，不删除对话历史。' \
         '  开发容器默认管理当前项目，另有查看全部与清理空闲；服务容器管理应用部署。' \
+        '  检查更新：更新版本并重建全部镜像和容器；中断前询问，保留持久数据。' \
+        '  安装／卸载随实际状态切换；删除容器和镜像，保留挂载的会话、应用及部署脚本。' \
+        '  镜像构建与容器重建由安装／检查更新统一完成，不需要手动构建。' \
         '  对话、历史、模型和插件由原生 Pi 管理。' \
         '「Esc」返回／退出 · 「↑/↓」选择 · 「Enter」确认；危险操作默认取消。' \
         '断开：「Ctrl+B」，再按「D」；结束：在菜单选择「结束 Pi」。'
@@ -109,17 +112,32 @@ pick_running() {
     choice=$(MENU_INDEX=0 menu_select '运行中的 Pi' "${labels[@]}") || return 1
     printf '%s' "${names[choice]}"
 }
-build_menu() {
-    local action=$1 title=$2 arg note='KEY=value；勿填凭据，可能留在构建日志、缓存或镜像中。'
-    local -a args=()
+install_menu() {
+    local state=$1 activity
     while true; do
-        arg=$(menu_input "$title" "$note") || return 0
-        [[ -n "$arg" ]] || break
-        if [[ ! "$arg" =~ ^[A-Za-z_][A-Za-z0-9_]*= || "$arg" =~ [[:cntrl:]] ]]; then note='「格式错误」请输入 KEY=value。'; continue; fi
-        args+=(--build-arg "$arg")
-        note="已添加 $((${#args[@]} / 2)) 项；勿填凭据，可能留在构建日志、缓存或镜像中。"
+        if [[ "$state" != install && "$state" != uninstall ]]; then
+            if ! state=$(query_rows '安装状态' '无法读取 Docker 状态。' tool-install-state); then
+                if confirm '状态读取失败，是否重新检查？'; then continue; fi
+                return 0
+            fi
+        fi
+        if [[ "$state" == uninstall ]]; then
+            activity=$(query_rows '卸载 · 会话与影响范围' '无法完整读取会话。' tool-remove-plan) || activity='无法完整读取会话；会按管理标签重新核对范围，确认后中断全部受管会话。'
+            if ! MENU_CONTEXT="$activity" confirm '卸载下列范围的全部容器与镜像，会中断列出的会话；保留挂载数据和脚本'; then return 0; fi
+            if command_output view '卸载' tool-uninstall; then return 0; fi
+        else
+            if ! confirm '安装：无缓存重建开发／服务镜像；启用部署时启动服务，保留已有数据'; then return 0; fi
+            if command_output view '安装' tool-install; then return 0; fi
+        fi
+        if ! confirm '操作未完成，是否重新检查范围并重试此操作？'; then return 0; fi
     done
-    run view "$title" "$action" "${args[@]}"
+}
+ensure_runtime() {
+    local state
+    state=$(query_rows '运行环境' '无法检查镜像。' tool-runtime-ready) || return 1
+    [[ "$state" != ready ]] || return 0
+    install_menu install
+    [[ "$(bash "$CONTROL" tool-runtime-ready 2>/dev/null)" == ready ]]
 }
 app_menu() {
     local rows name enabled revision choice target invalid
@@ -141,18 +159,47 @@ app_menu() {
         if confirm "「$name」修改自启动？当前进程不变"; then run change '应用自启动' service-app-set "$name" "$target" "$revision"; fi
     done
 }
+update_menu() {
+    local versions old target mode selected activity
+    while true; do
+        if ! versions=$(query_rows '检查更新' '「检查失败」请检查 Git 和网络连接。' tool-check); then
+            if confirm '检查失败，是否重新检查？'; then continue; fi
+            return 0
+        fi
+        IFS=$'\t' read -r old target mode <<< "$versions"
+        if [[ ! "$old" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ || ! "$target" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ || ! "$mode" =~ ^(standard|backup)$ ]]; then
+            message '检查更新' '版本信息不完整；请重新检查。'; return 0
+        fi
+        if [[ "$mode" == backup ]]; then
+            selected=$(MENU_INDEX=0 MENU_NOTICE='本地修改／分支与上游不同；备份留在本地，不自动重放' menu_select '检查更新 · 本地源码' '取消' $'备份后更新\t保留本地提交和修改，切换到上游 main') || return 0
+            [[ "$selected" == 1 ]] || return 0
+        fi
+        if ! activity=$(query_rows "检查更新 · ${old:0:8} → ${target:0:8}" '无法完整核对范围。' tool-plan); then
+            if confirm '范围检查失败，是否重新检查？'; then continue; fi
+            return 0
+        fi
+        local note='更新并重建全部受管镜像与已有容器；Pi、终端和应用会中断，请先备份'
+        [[ "$old" != "$target" ]] || note='源码已是最新；仍要构建全部镜像并重建已有容器？Pi、终端和应用会中断'
+        if ! MENU_CONTEXT="当前：${old:0:8} → 上游：${target:0:8}"$'\n'"$activity" confirm "$note"; then return 0; fi
+        if command_output view '检查更新 · 更新与重建' tool-update "$old" "$target" "$mode"; then exit 0; fi
+        if confirm '维护未完成，是否重新打开 pc 后检查并重试？'; then
+            stty "$SAVED_TTY"; menu_screen_close; trap - EXIT
+            exec bash "$SCRIPT"
+        fi
+        exit 0
+    done
+}
 container_menu() {
-    local kind=$1 title choice action
-    local -a actions=(state shell logs build rebuild) labels=(
-        $'查看状态\t容器与运行环境' $'管理终端\t进入容器 Shell'
-        $'查看日志\t最近 200 行' $'构建镜像\t使用缓存' $'无缓存构建\t重新获取依赖'
+    local kind=$1 title choice action selected activity
+    local -a actions=(state shell logs) labels=(
+        $'查看状态\t容器与运行环境' $'管理终端\t进入容器 Shell' $'查看日志\t最近 200 行'
     )
     if [[ "$kind" == service ]]; then
         title='服务容器'
         actions+=(start); labels+=($'启动容器\t等待核心服务就绪')
     else title='开发容器'; fi
-    actions+=(recreate stop remove)
-    labels+=($'重建容器\t使用已构建镜像' $'停止容器\t保留数据' $'删除容器\t保留数据')
+    actions+=(stop remove)
+    labels+=($'停止容器\t保留数据' $'删除容器\t保留数据')
     if [[ "$kind" == service ]]; then actions+=(apps); labels+=($'应用自启动\t逐个应用设置')
     else
         actions+=(list remove-all)
@@ -163,34 +210,49 @@ container_menu() {
         action=${actions[choice]}
         case "$action" in
             state|logs|list) run view "$title · ${labels[choice]%%$'\t'*}" "$kind-$action" ;;
-            shell) terminal "$title · 管理终端" "$kind-shell" ;;
-            build|rebuild) build_menu "$kind-$action" "$title · ${labels[choice]%%$'\t'*}" ;;
-            start) run change '服务容器 · 启动容器' service-start ;;
+            shell) if ensure_runtime; then terminal "$title · 管理终端" "$kind-shell"; fi ;;
+            start) if ensure_runtime; then run change '服务容器 · 启动容器' service-start; fi ;;
             apps) app_menu ;;
             remove-all)
-                if confirm '「清理空闲」仅本安装、当前用户；占用或状态未知的不删，保留项目与 Pi 数据'; then
-                    run view '开发容器 · 清理空闲' dev-remove-all
+                activity=$(query_rows '开发容器 · 会话与范围' '无法完整读取会话。' dev-all-activity) || activity='会话状态读取不完整，确认后仍按本安装、当前用户范围检查。'
+                selected=$(MENU_INDEX=0 MENU_CONTEXT="$activity" MENU_NOTICE='中断后清理全部会结束列出的 Pi／终端；挂载数据保留' menu_select '清理开发容器' '取消' '仅清理空闲' '中断后清理全部') || continue
+                if [[ "$selected" == 2 ]]; then run view '开发容器 · 清理全部' dev-remove-all --confirmed-interruption
+                elif [[ "$selected" == 1 ]]; then
+                    if ! command_output view '开发容器 · 清理空闲' dev-remove-all; then
+                        if MENU_CONTEXT="$activity" confirm '仍有占用或未知状态，是否中断下面列出的会话后继续清理全部？'; then run view '开发容器 · 清理全部' dev-remove-all --confirmed-interruption; fi
+                    fi
                 fi ;;
-            recreate|stop|remove)
-                if [[ "$kind" == service ]]; then
-                    if ! confirm "「${labels[choice]%%$'\t'*}」会中断全部应用；保留数据"; then continue; fi
-                else
-                    if ! confirm "「${labels[choice]%%$'\t'*}」保留数据；仅空闲容器可操作"; then continue; fi
-                fi
-                run change "$title · ${labels[choice]%%$'\t'*}" "$kind-$action" ;;
+            stop|remove)
+                while true; do
+                    activity=$(query_rows "$title · 会话与影响范围" '无法完整读取会话。' "$kind-activity") || activity='会话状态读取不完整；确认继续仍会中断此容器的全部会话。'
+                    if ! MENU_CONTEXT="$activity" confirm "「${labels[choice]%%$'\t'*}」会中断下面容器的全部 Pi、终端或应用；保留挂载数据"; then break; fi
+                    if [[ "$kind" == dev ]]; then
+                        if command_output change "$title · ${labels[choice]%%$'\t'*}" "$kind-$action" --confirmed-interruption; then MENU_NOTICE="「已完成」${labels[choice]%%$'\t'*}"; break; fi
+                    elif command_output change "$title · ${labels[choice]%%$'\t'*}" "$kind-$action"; then MENU_NOTICE="「已完成」${labels[choice]%%$'\t'*}"; break; fi
+                    if ! confirm '操作未完成，是否重新检查会话后重试？'; then break; fi
+                done ;;
         esac
     done
 }
 while true; do
+    install_state=$(bash "$CONTROL" tool-install-state 2>/dev/null) || install_state=unknown
+    case "$install_state" in
+        install) install_label=$'安装\t准备镜像与运行环境' ;;
+        uninstall) install_label=$'卸载\t删除镜像和容器，保留挂载数据' ;;
+        *) install_label=$'安装状态\t重新检测后选择安装或卸载' ;;
+    esac
     MENU_NOTICE=${MENU_NOTICE:-$(pwd -P)}
     MENU_ESCAPE_LABEL=退出 choose main 'Pi in Container' \
         $'接回 Pi\t继续原进程' $'启动 Pi\t断开终端后继续运行' \
-        $'结束 Pi\t停止进程，保留历史' $'开发容器\t当前项目与批量维护' $'服务容器\t应用部署与自启动' || exit 0
+        $'结束 Pi\t停止进程，保留历史' $'开发容器\t当前项目与批量维护' $'服务容器\t应用部署与自启动' \
+        $'检查更新\t更新版本并重建全部镜像和容器' "$install_label" || exit 0
     case "$choice" in
         0) if name=$(pick_running); then terminal '接回 Pi' pi-connect "$name"; fi ;;
-        1) terminal '启动 Pi' pi-start ;;
+        1) if ensure_runtime; then terminal '启动 Pi' pi-start; fi ;;
         2) if name=$(pick_running) && confirm "「结束 $name」请求和工具将中断；保留历史"; then run change '结束 Pi' pi-end "$name"; fi ;;
         3) container_menu dev ;;
         4) container_menu service ;;
+        5) update_menu ;;
+        6) install_menu "$install_state" ;;
     esac
 done

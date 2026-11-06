@@ -6,6 +6,7 @@ services-data/
 .runtime/
 .deploy-keys/
 .services.lock
+.update.lock
 node_modules/
 **/node_modules/
 **/__pycache__/
