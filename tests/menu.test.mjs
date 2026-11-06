@@ -48,7 +48,7 @@ test('arrow selector ignores digits and bracketed paste; standard/application cu
   assert(!f.output().includes('RESULT:'), 'pasted Enter must not execute an action');
   const output = await f.finish('\x1bOB\r');
   assert.match(output, /\x1b\[7mSecond/);
-  assert.match(output, /1\r?\n\x1b\[\?2004l/);
+  assert.match(output, /1\r?\n\x1b\[0m\x1b\[\?2004l/);
   assert.doesNotMatch(output, /[0-9]\) /);
 });
 
@@ -58,7 +58,7 @@ test('long lists page, Home/End select edges and small terminals keep all rows w
   f.proc.write('\x1b[5~'); await f.wait(s => s.split('\x1b[7mItem-0').length >= 3);
   f.proc.write('\x1b[F'); await f.wait(s => s.includes('\x1b[7mItem-39'));
   const output = await f.finish('\r');
-  assert.match(output, /39\r?\n\x1b\[\?2004l/);
+  assert.match(output, /39\r?\n\x1b\[0m\x1b\[\?2004l/);
   for (const frame of output.split('\x1b[H\x1b[2J').slice(1)) assert(frame.split('\x1b[?2004l')[0].split('\n').length <= 9, frame);
 });
 

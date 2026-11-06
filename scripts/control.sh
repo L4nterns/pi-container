@@ -71,25 +71,38 @@ case "$action" in
     dev-list)
         (( $# == 0 )) || invalid
         projects=$(managed_projects | sort -u)
-        if [[ -z "$projects" ]]; then printf '没有本安装的开发容器。\n'; else
-            while IFS= read -r name; do "${CORE[@]}" --project-name "$name" ps -a; done <<< "$projects"
+        if [[ -z "$projects" ]]; then printf '「暂无开发容器」\n'; else
+            while IFS= read -r name; do
+                cid=$("${CORE[@]}" --project-name "$name" ps -aq pi)
+                if [[ -n "$cid" ]]; then
+                    directory=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}' "$cid")
+                    printf '项目目录：%s\n' "${directory:-未确认}"
+                    "${CORE[@]}" --project-name "$name" ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
+                fi
+            done <<< "$projects"
         fi; exit 0 ;;
     dev-state)
         (( $# == 0 )) || invalid
-        "${CURRENT[@]}" ps -a --format json
-        printf '\n源码：'; git -C "$REPO" describe --always --dirty 2>/dev/null || printf '未知（不含 Git 信息）\n'
+        "${CURRENT[@]}" ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
+        printf '\n源码版本：'; git -C "$REPO" describe --always --dirty 2>/dev/null || printf '源码包\n'
         built=$(docker image inspect --format '{{.Id}}' "$PIC_IMAGE" 2>/dev/null) || built=''
-        printf '已构建镜像：%s\n' "${built:-未知或尚未构建}"
         cid=$("${CURRENT[@]}" ps -q pi)
         if [[ -n "$cid" ]]; then
             current=$(docker inspect --format '{{.Image}}' "$cid")
-            printf '当前容器镜像：%s\n' "$current"
-            if [[ -n "$built" && "$current" == "$built" ]]; then printf '镜像一致：是\n'; else printf '镜像一致：否或未确认（不会自动重建）\n'; fi
-            printf '容器 Pi：'; docker exec --user "$PIC_UID:$PIC_GID" "$cid" pi --version || printf '未确认\n'
-            printf 'Gateway 默认 Git 安装提交：'
-            docker exec --user "$PIC_UID:$PIC_GID" "$cid" git -C /home/node/.pi/agent/git/github.com/L4nterns/pi-provider-gateway rev-parse --short HEAD 2>/dev/null || printf '未确认（其他安装来源请用原生 pi list 查看）\n'
-        else printf '当前容器未运行；未启动容器查询版本。\n'; fi
-        printf '源码、镜像与持久化插件独立更新；这些查询不会执行更新。\n'; exit 0 ;;
+            if [[ -z "$built" ]]; then printf '镜像：尚未构建或无法确认\n'
+            elif [[ "$current" == "$built" ]]; then printf '镜像：与已构建镜像一致\n'
+            else printf '镜像：有新镜像，选择「重建容器」应用\n'; fi
+            printf 'Pi 版本：'; docker exec --user "$PIC_UID:$PIC_GID" "$cid" pi --version || printf '未确认\n'
+            printf 'Gateway 提交：'
+            docker exec --user "$PIC_UID:$PIC_GID" "$cid" git -C /home/node/.pi/agent/git/github.com/L4nterns/pi-provider-gateway rev-parse --short HEAD 2>/dev/null || printf '未确认，请用「pi list」查看\n'
+        else
+            printf '容器：未运行\n'
+            if [[ -n "$built" ]]; then printf '镜像：已构建\n'; else printf '镜像：尚未构建或无法确认\n'; fi
+        fi
+        exit 0 ;;
+    dev-logs)
+        (( $# == 0 )) || invalid
+        "${CURRENT[@]}" logs --no-color --no-log-prefix --tail 200 pi; exit 0 ;;
     pi-running|pi-end)
         if [[ "$action" == pi-end ]]; then
             if (( $# != 1 )) || [[ ! "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ ]]; then invalid; fi
@@ -118,7 +131,7 @@ case "$action" in
     dev-build|dev-rebuild)
         build_flags=(); [[ "$action" != dev-rebuild ]] || build_flags+=(--no-cache)
         "${CURRENT[@]}" build "${build_flags[@]}" "$@" pi
-        printf '镜像构建完成；现有容器仍使用原镜像。请在任务结束后选择「重建容器」应用镜像；不会自动重启 Pi 或更新持久化插件。\n'
+        printf '「镜像构建完成」选择「重建容器」应用；现有容器仍使用原镜像。\n'
         exit 0 ;;
     pi-start|pi-connect)
         if (( $# > 1 )) || { (( $# == 1 )) && [[ ! "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ ]]; }; then invalid; fi
@@ -128,7 +141,8 @@ case "$action" in
     service-app-list) (( $# == 0 )) || invalid ;;
     service-app-set)
         if (( $# != 3 )) || [[ ! "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ || ! "$2" =~ ^(true|false)$ || ! "$3" =~ ^[0-9a-f]{64}$ ]]; then invalid; fi ;;
-    service-start|service-stop|service-remove|service-state|service-logs|service-build|service-recreate) (( $# == 0 )) || invalid ;;
+    service-build|service-rebuild) ;;
+    service-start|service-stop|service-remove|service-state|service-logs|service-recreate) (( $# == 0 )) || invalid ;;
     *) invalid ;;
 esac
 if [[ "$WORKDIR" == / && "$action" != service-* ]]; then printf '拒绝将宿主机根目录 / 挂载为工作区；请进入具体项目目录。\n' >&2; exit 2; fi
@@ -162,14 +176,17 @@ if [[ "$action" == service-* ]]; then
         service-stop) "${SERVICE_COMPOSE[@]}" stop services ;;
         service-remove) "${SERVICE_COMPOSE[@]}" down --remove-orphans ;;
         service-state)
-            "${SERVICE_COMPOSE[@]}" ps
-            printf '服务重启策略：unless-stopped（默认随 Docker 恢复；手动停止后需手动启动）。\n应用默认自启动；已有 autostart=false 保持不变。\n'
+            "${SERVICE_COMPOSE[@]}" ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
+            printf '\n恢复策略：随 Docker 启动；手动停止后保持停止\n'
             cid=$("${SERVICE_COMPOSE[@]}" ps -q services)
             if [[ -n "$cid" ]]; then
-                docker inspect --format '当前实际重启策略：{{.HostConfig.RestartPolicy.Name}}' "$cid"
-            else printf '服务容器未运行；未自动启动。\n'; fi ;;
-        service-logs) "${SERVICE_COMPOSE[@]}" logs --tail 200 services ;;
-        service-build) "${SERVICE_COMPOSE[@]}" build services ;;
+                docker inspect --format '当前重启策略：{{.HostConfig.RestartPolicy.Name}}' "$cid"
+            else printf '容器：未运行\n'; fi ;;
+        service-logs) "${SERVICE_COMPOSE[@]}" logs --no-color --no-log-prefix --tail 200 services ;;
+        service-build|service-rebuild)
+            build_flags=(); [[ "$action" != service-rebuild ]] || build_flags+=(--no-cache)
+            "${SERVICE_COMPOSE[@]}" build "${build_flags[@]}" "$@" services
+            printf '「镜像构建完成」选择「重建容器」应用；现有容器仍使用原镜像。\n' ;;
         service-recreate) deployment_prepare_data; "${SERVICE_COMPOSE[@]}" up -d --wait --force-recreate --no-build services ;;
         service-app-list|service-app-set)
             cid=$("${SERVICE_COMPOSE[@]}" ps -q services)

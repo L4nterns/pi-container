@@ -19,7 +19,7 @@ jobs:
       - name: Install ShellCheck, Python and OpenSSH for real-tool regressions
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck python3 openssh-client tmux util-linux
+          sudo apt-get install -y shellcheck python3 openssh-client tmux util-linux ripgrep fd-find
       - name: Install latest Pi for tests
         run: npm install --ignore-scripts --package-lock=false
       - name: Check scripts and run isolated tests

@@ -9,150 +9,185 @@ help_text() {
         '  启动 Pi：在容器内托管，断开终端后继续运行。' \
         '  结束 Pi：停止进程，不删除对话历史。' \
         '  开发容器、服务容器与应用自启动均在菜单中管理。' \
-        '  对话、历史、模型和插件由原生 Pi 管理；不转发 Pi 参数。' \
-        '菜单：↑/↓ 选择，Enter 确认，Esc 返回；危险操作默认取消。' \
-        '断开：Ctrl+B，再按 D；结束：在菜单明确选择结束进程。'
+        '  对话、历史、模型和插件由原生 Pi 管理。' \
+        '「↑/↓」选择 · 「Enter」确认 · 「Esc」返回；危险操作默认取消。' \
+        '断开：「Ctrl+B」，再按「D」；结束：在菜单选择「结束 Pi」。'
 }
 if (( $# )); then
     if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then help_text; exit 0; fi
-    printf '不接受子命令。请只输入 pc 或 pi-container，在菜单中选择。\n' >&2; exit 2
+    printf '请只输入「pc」或「pi-container」，在菜单中选择。\n' >&2; exit 2
 fi
 if [[ ! -t 0 || ! -t 1 ]]; then printf 'pc / pi-container 需要交互终端；请直接在终端运行。\n' >&2; exit 2; fi
 # shellcheck source=lib/menu.sh
 source "$REPO/lib/menu.sh"
 CONTROL="$REPO/scripts/control.sh"
 declare -A positions=()
-# Keep positions only in this invocation, not in project or user configuration.
+MENU_NOTICE=''
+SAVED_TTY=$(stty -g)
+trap 'stty "$SAVED_TTY"; menu_screen_close' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+menu_screen_open
+# Positions belong to this invocation, never to user/project configuration.
 choose() {
     local key=$1; shift
     choice=$(MENU_INDEX="${positions[$key]:-0}" menu_select "$@") || return
     positions[$key]=$choice
+    MENU_NOTICE=''
 }
-pause_menu() { read -r -p '按回车返回菜单…' _ || true; }
 confirm() {
     local selected
-    selected=$(MENU_INDEX=0 menu_select "$1" '取消' '确认') || return 1
+    selected=$(MENU_INDEX=0 MENU_NOTICE='' menu_select "$1" '取消' '确认') || return 1
     [[ "$selected" == 1 ]]
 }
+message() (
+    local file
+    file=$(umask 077; mktemp) || return
+    trap 'rm -f -- "$file"' EXIT
+    printf '%s\n' "$2" > "$file"
+    menu_view "$1" "$file"
+)
+# One output screen for status/logs/builds and errors. Private transient capture
+# enables paging; it is removed on return/signals. No hidden worker or operation
+# is left behind when Esc returns after completion.
+command_output() (
+    local mode=$1 title=$2 file status=0 saved
+    shift 2
+    file=$(umask 077; mktemp) || return
+    saved=$(stty -g)
+    trap 'stty "$saved"; rm -f -- "$file"' EXIT
+    stty -echo
+    menu_heading "$title" '「正在执行」' || return
+    if bash "$CONTROL" "$@" </dev/null 2>&1 | tee /dev/stderr | tail -c 1048576 > "$file"; then :
+    else status=$?; fi
+    if (( status )); then printf '\n「操作失败」退出码：%s\n' "$status" >> "$file"; fi
+    if [[ "$mode" == view ]] || (( status )); then
+        MENU_VIEW_END=1 menu_view "$title" "$file"
+    fi
+    return "$status"
+)
 run() {
-    local status=0
-    printf '正在执行…\n'
-    bash "$CONTROL" "$@" || status=$?
-    if (( status )); then printf '\n操作未完成（退出码 %s）；未自动改用其他行为。\n' "$status" >&2; fi
-    pause_menu
+    local mode=$1 title=$2; shift 2
+    if command_output "$mode" "$title" "$@"; then
+        if [[ "$mode" == change ]]; then MENU_NOTICE="「已完成」$title"; fi
+    fi
 }
+# Native Pi/Shell own the terminal while connected. Normal exit/detach returns
+# directly to the originating menu: no acknowledgement, no extra parent level.
+terminal() {
+    local title=$1 status=0; shift
+    menu_screen_close
+    bash "$CONTROL" "$@" || status=$?
+    menu_screen_open
+    if (( status )); then message "$title" "「连接已结束」退出码：$status"; fi
+}
+query_rows() (
+    local title=$1 failure=$2 file status=0; shift 2
+    file=$(umask 077; mktemp) || return
+    trap 'rm -f -- "$file"' EXIT
+    menu_heading "$title" '「正在读取」' || return
+    rows=$(bash "$CONTROL" "$@" 2>"$file") || status=$?
+    if (( status )); then
+        printf '\n%s\n「退出码」%s\n' "$failure" "$status" >> "$file"
+        menu_view "$title" "$file"; return 1
+    fi
+    printf '%s' "$rows"
+)
 pick_running() {
-    local rows line name attached created choice invalid=0
-    local -a names=() labels=()
-    printf '正在查询运行中的 Pi…\n' >&2
-    rows=$(bash "$CONTROL" pi-running) || { printf '运行状态未确认；不会把错误当成没有进程。\n' >&2; pause_menu; return 1; }
-    if [[ -z "$rows" ]]; then printf '当前项目没有运行中的 Pi；可选择「启动 Pi」。历史对话由 Pi 内的 /resume 管理。\n' >&2; pause_menu; return 1; fi
+    local rows name attached created choice invalid=0
+    local -a names=() labels=('返回')
+    rows=$(query_rows '运行中的 Pi' '「查询失败」请稍后重试。' pi-running) || return 1
+    if [[ -z "$rows" ]]; then message '运行中的 Pi' '「暂无运行中的 Pi」可返回选择「启动 Pi」；历史对话使用「/resume」。'; return 1; fi
     while IFS=$'\t' read -r name attached created; do
         if [[ ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ || ! "$attached" =~ ^[0-9]+$ || ! "$created" =~ ^[0-9]+$ ]]; then invalid=1; break; fi
         names+=("$name")
-        if [[ "$attached" == 0 ]]; then line='后台运行 · 没有终端连接'; else line="运行中 · $attached 个终端连接"; fi
-        labels+=("$name  $line")
+        if [[ "$attached" == 0 ]]; then labels+=("$name  后台运行"); else labels+=("$name  $attached 个终端连接"); fi
     done <<< "$rows"
-    if (( invalid )); then printf '进程状态格式错误。\n' >&2; pause_menu; return 1; fi
-    choice=$(menu_select '运行中的 Pi — 仅活进程，不包含历史对话' "${labels[@]}" '返回') || return 1
-    (( choice < ${#names[@]} )) || return 1
-    printf '%s' "${names[choice]}"
+    if (( invalid )); then message '运行中的 Pi' '「进程状态格式错误」请稍后重试。'; return 1; fi
+    choice=$(MENU_INDEX=0 menu_select '运行中的 Pi' "${labels[@]}") || return 1
+    (( choice > 0 )) || return 1
+    printf '%s' "${names[choice-1]}"
 }
 build_menu() {
-    local action=$1 arg
+    local action=$1 title=$2 arg note='「可选构建参数」每行 KEY=value；空行开始。请勿填写密码。'
     local -a args=()
-    printf '可选 Build args，每行 KEY=value；直接回车开始。不要输入密码。\n'
-    while read -r -p 'Build arg：' arg && [[ -n "$arg" ]]; do
-        if [[ ! "$arg" =~ ^[A-Za-z_][A-Za-z0-9_]*= || "$arg" =~ [[:cntrl:]] ]]; then printf '格式错误，请重试。\n'; continue; fi
-        args+=(--build-arg "$arg")
-    done
-    run "$action" "${args[@]}"
-}
-container_menu() {
-    local choice
     while true; do
-        choose dev '开发容器' \
-            '查看状态  当前项目、镜像与运行版本' '构建镜像  使用构建缓存，不替换容器' \
-            '无缓存构建  获取当前依赖，不替换容器' '停止容器  有 Pi 或终端连接时拒绝' \
-            '重建容器  使用已构建镜像，保留数据' '删除容器  仅当前项目，保留数据' \
-            '查看全部  本安装的开发容器' '清理空闲  删除本安装全部空闲开发容器，保留数据' '返回' || return 0
-        case "$choice" in
-            0) run dev-state ;;
-            1) build_menu dev-build ;;
-            2) build_menu dev-rebuild ;;
-            3) if confirm '停止容器？有运行中的 Pi 或终端连接时会拒绝'; then run dev-stop; fi ;;
-            4) if confirm '重建容器？使用已构建镜像；有 Pi 或终端连接时拒绝'; then run dev-recreate; fi ;;
-            5) if confirm '删除当前项目容器？项目文件与历史对话不删除'; then run dev-remove; fi ;;
-            6) run dev-list ;;
-            7) if confirm '清理全部空闲开发容器？保留数据'; then run dev-remove-all; fi ;;
-            8) return ;;
-        esac
+        arg=$(menu_input "$title" "$note") || return 0
+        [[ -n "$arg" ]] || break
+        if [[ ! "$arg" =~ ^[A-Za-z_][A-Za-z0-9_]*= || "$arg" =~ [[:cntrl:]] ]]; then note='「格式错误」请输入 KEY=value。'; continue; fi
+        args+=(--build-arg "$arg")
+        note="「构建参数」已添加 $((${#args[@]} / 2)) 项；空行开始。"
     done
+    run view "$title" "$action" "${args[@]}"
 }
 app_menu() {
     local rows name enabled revision choice target invalid
     local -a names=() labels=() revisions=()
     while true; do
-        names=(); labels=(); revisions=(); invalid=0
-        printf '正在读取应用自启动配置…\n'
-        rows=$(bash "$CONTROL" service-app-list) || { printf '读取失败；未启动服务容器，也未修改应用。\n' >&2; pause_menu; return; }
-        if [[ -z "$rows" ]]; then printf '尚无应用进程定义；请通过部署 skill 或 SSH 发布应用。\n'; pause_menu; return; fi
+        names=(); labels=('返回'); revisions=(); invalid=0
+        rows=$(query_rows '应用自启动' '「读取失败」请检查服务容器。' service-app-list) || return 0
+        if [[ -z "$rows" ]]; then message '应用自启动' '「暂无应用」请先发布应用。'; return 0; fi
         while IFS=$'\t' read -r name enabled revision; do
-            if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ || ! "$enabled" =~ ^(true|false)$ || ! "$revision" =~ ^[0-9a-f]{64}$ ]]; then
-                invalid=1; break
-            fi
+            if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ || ! "$enabled" =~ ^(true|false)$ || ! "$revision" =~ ^[0-9a-f]{64}$ ]]; then invalid=1; break; fi
             names+=("$name"); revisions+=("$revision")
-            if [[ "$enabled" == true ]]; then labels+=("$name  自启动：启用"); else labels+=("$name  自启动：禁用"); fi
+            if [[ "$enabled" == true ]]; then labels+=("$name  「已启用」"); else labels+=("$name  「已禁用」"); fi
         done <<< "$rows"
-        if (( invalid )); then printf '应用状态格式错误；未修改配置。\n' >&2; pause_menu; return; fi
-        choice=$(menu_select '应用自启动 — 仅影响下次服务启动，不中断当前进程' "${labels[@]}" '返回') || return 0
-        (( choice < ${#names[@]} )) || return 0
-        name=${names[choice]}; revision=${revisions[choice]}
-        choice=$(menu_select "$name — 修改持久 Supervisor 配置，当前进程不变" '返回' '启用自启动  下次随服务容器启动' '禁用自启动  下次不随服务容器启动') || continue
-        case "$choice" in
-            1) target=true ;;
-            2) target=false ;;
-            *) continue ;;
-        esac
-        if confirm "$name：设为自启动 $target？仅影响下次服务启动，不改变当前进程"; then run service-app-set "$name" "$target" "$revision"; fi
+        if (( invalid )); then message '应用自启动' '「应用状态格式错误」请重新打开。'; return 0; fi
+        choice=$(MENU_INDEX=0 menu_select '应用自启动 · 下次服务启动生效' "${labels[@]}") || return 0
+        (( choice > 0 )) || return 0
+        name=${names[choice-1]}; revision=${revisions[choice-1]}
+        choice=$(MENU_INDEX=0 menu_select "$name · 下次服务启动生效" '返回' $'启用自启动\t随服务容器启动' $'禁用自启动\t保持手动启动') || continue
+        case "$choice" in 1) target=true ;; 2) target=false ;; *) continue ;; esac
+        if confirm "「$name」修改自启动？当前进程不变"; then run change '应用自启动' service-app-set "$name" "$target" "$revision"; fi
     done
 }
-service_menu() {
-    local choice
+container_menu() {
+    local kind=$1 title choice action
+    local -a actions=(back state shell logs build rebuild) labels=(
+        '返回' $'查看状态\t容器与运行环境' $'管理终端\t进入容器 Shell'
+        $'查看日志\t最近 200 行' $'构建镜像\t使用缓存' $'无缓存构建\t重新获取依赖'
+    )
+    if [[ "$kind" == service ]]; then
+        title='服务容器'
+        actions+=(start); labels+=($'启动容器\t等待核心服务就绪')
+    else title='开发容器'; fi
+    actions+=(recreate stop remove)
+    labels+=($'重建容器\t使用已构建镜像' $'停止容器\t保留数据' $'删除容器\t保留数据')
+    if [[ "$kind" == service ]]; then actions+=(apps); labels+=($'应用自启动\t逐个应用设置')
+    else actions+=(list remove-all); labels+=($'查看全部\t本安装的开发容器' $'清理空闲\t删除本安装的空闲容器'); fi
     while true; do
-        choose service '服务容器 — 默认随 Docker 恢复；手动停止后需手动启动' \
-            '管理终端  SSH 进入独立 Debian 环境' '查看状态  容器与重启策略' '启动容器  启动并等待核心服务就绪' \
-            '查看日志  最近 200 行，可能包含业务信息' '构建镜像  不替换当前容器' \
-            '停止容器  中断全部应用，保留数据' '重建容器  使用已构建镜像，中断应用，保留数据' \
-            '删除容器  中断全部应用，保留业务数据' '应用自启动  管理下次服务启动时恢复的应用' '返回' || return 0
-        case "$choice" in
-            0) run service-shell ;;
-            1) run service-state ;;
-            2) run service-start ;;
-            3) run service-logs ;;
-            4) run service-build ;;
-            5) if confirm '停止服务容器并中断全部应用？手动停止后需手动启动'; then run service-stop; fi ;;
-            6) if confirm '重建服务容器并中断全部应用？持久数据保留'; then run service-recreate; fi ;;
-            7) if confirm '删除服务容器？保留业务数据，需手动创建后才会恢复'; then run service-remove; fi ;;
-            8) app_menu ;;
-            9) return ;;
+        choose "$kind" "$title" "${labels[@]}" || return 0
+        action=${actions[choice]}
+        case "$action" in
+            back) return 0 ;;
+            state|logs|list) run view "$title · ${labels[choice]%%$'\t'*}" "$kind-$action" ;;
+            shell) terminal "$title · 管理终端" "$kind-shell" ;;
+            build|rebuild) build_menu "$kind-$action" "$title · ${labels[choice]%%$'\t'*}" ;;
+            start) run change '服务容器 · 启动容器' service-start ;;
+            apps) app_menu ;;
+            recreate|stop|remove|remove-all)
+                if [[ "$kind" == service ]]; then
+                    if ! confirm "「${labels[choice]%%$'\t'*}」会中断全部应用；保留数据"; then continue; fi
+                else
+                    if ! confirm "「${labels[choice]%%$'\t'*}」保留数据；仅空闲容器可操作"; then continue; fi
+                fi
+                run change "$title · ${labels[choice]%%$'\t'*}" "$kind-$action" ;;
         esac
     done
 }
 while true; do
-    choose main "Pi in Container — 项目：$(pwd -P)" \
-        '接回 Pi  同一进程，继续查看输出和操作' \
-        '启动 Pi  容器内托管，断开终端后继续运行' \
-        '结束 Pi  停止进程，不删除对话历史' \
-        '开发终端  进入当前项目 Shell' '开发容器  镜像、状态与维护' \
-        '服务容器  独立运行应用，管理自启动' '退出菜单  运行中的 Pi 继续' || exit 0
+    choose main "Pi in Container · $(pwd -P)" \
+        $'退出菜单\tPi 继续运行' $'接回 Pi\t继续原进程' $'启动 Pi\t断开终端后继续运行' \
+        $'结束 Pi\t停止进程，保留历史' $'开发终端\t进入项目 Shell' \
+        $'开发容器\t状态、镜像与维护' $'服务容器\t应用部署与自启动' || exit 0
     case "$choice" in
-        0) if name=$(pick_running); then run pi-connect "$name"; fi ;;
-        1) run pi-start ;;
-        2) if name=$(pick_running) && confirm "结束进程 $name？请求和工具可能被中断，历史保留"; then run pi-end "$name"; fi ;;
-        3) run dev-shell ;;
-        4) container_menu ;;
-        5) service_menu ;;
-        6) exit 0 ;;
+        0) exit 0 ;;
+        1) if name=$(pick_running); then terminal '接回 Pi' pi-connect "$name"; fi ;;
+        2) terminal '启动 Pi' pi-start ;;
+        3) if name=$(pick_running) && confirm "「结束 $name」请求和工具将中断；保留历史"; then run change '结束 Pi' pi-end "$name"; fi ;;
+        4) terminal '开发终端' dev-shell ;;
+        5) container_menu dev ;;
+        6) container_menu service ;;
     esac
 done
