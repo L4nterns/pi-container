@@ -8,7 +8,7 @@ help_text() {
         '  接回 Pi：连接原进程，任务继续。' \
         '  启动 Pi：在容器内托管，断开终端后继续运行。' \
         '  结束 Pi：停止进程，不删除对话历史。' \
-        '  项目容器仅管理当前宿主目录；服务容器管理应用部署。' \
+        '  开发容器默认管理当前项目，另有查看全部与清理空闲；服务容器管理应用部署。' \
         '  对话、历史、模型和插件由原生 Pi 管理。' \
         '「Esc」返回／退出 · 「↑/↓」选择 · 「Enter」确认；危险操作默认取消。' \
         '断开：「Ctrl+B」，再按「D」；结束：在菜单选择「结束 Pi」。'
@@ -150,19 +150,27 @@ container_menu() {
     if [[ "$kind" == service ]]; then
         title='服务容器'
         actions+=(start); labels+=($'启动容器\t等待核心服务就绪')
-    else title='项目容器'; fi
+    else title='开发容器'; fi
     actions+=(recreate stop remove)
     labels+=($'重建容器\t使用已构建镜像' $'停止容器\t保留数据' $'删除容器\t保留数据')
-    if [[ "$kind" == service ]]; then actions+=(apps); labels+=($'应用自启动\t逐个应用设置'); fi
+    if [[ "$kind" == service ]]; then actions+=(apps); labels+=($'应用自启动\t逐个应用设置')
+    else
+        actions+=(list remove-all)
+        labels+=($'查看全部\t本安装、当前用户的开发容器' $'清理空闲\t批量删除空闲开发容器，保留数据')
+    fi
     while true; do
         choose "$kind" "$title" "${labels[@]}" || return 0
         action=${actions[choice]}
         case "$action" in
-            state|logs) run view "$title · ${labels[choice]%%$'\t'*}" "$kind-$action" ;;
+            state|logs|list) run view "$title · ${labels[choice]%%$'\t'*}" "$kind-$action" ;;
             shell) terminal "$title · 管理终端" "$kind-shell" ;;
             build|rebuild) build_menu "$kind-$action" "$title · ${labels[choice]%%$'\t'*}" ;;
             start) run change '服务容器 · 启动容器' service-start ;;
             apps) app_menu ;;
+            remove-all)
+                if confirm '「清理空闲」仅本安装、当前用户；占用或状态未知的不删，保留项目与 Pi 数据'; then
+                    run view '开发容器 · 清理空闲' dev-remove-all
+                fi ;;
             recreate|stop|remove)
                 if [[ "$kind" == service ]]; then
                     if ! confirm "「${labels[choice]%%$'\t'*}」会中断全部应用；保留数据"; then continue; fi
@@ -177,7 +185,7 @@ while true; do
     MENU_NOTICE=${MENU_NOTICE:-$(pwd -P)}
     MENU_ESCAPE_LABEL=退出 choose main 'Pi in Container' \
         $'接回 Pi\t继续原进程' $'启动 Pi\t断开终端后继续运行' \
-        $'结束 Pi\t停止进程，保留历史' $'项目容器\t仅当前宿主目录' $'服务容器\t应用部署与自启动' || exit 0
+        $'结束 Pi\t停止进程，保留历史' $'开发容器\t当前项目与批量维护' $'服务容器\t应用部署与自启动' || exit 0
     case "$choice" in
         0) if name=$(pick_running); then terminal '接回 Pi' pi-connect "$name"; fi ;;
         1) terminal '启动 Pi' pi-start ;;

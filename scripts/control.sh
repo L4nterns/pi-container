@@ -27,7 +27,7 @@ init_lifecycle() { session_lifecycle_init "$REPO/.runtime/$PROJECT"; }
 TERMINAL_ENV=(--env "TERM=${TERM:-dumb}" --env "COLORTERM=${COLORTERM:-}" --env "COLORFGBG=${COLORFGBG:-}")
 require_existing_container() {
     cid=$("${CURRENT[@]}" ps -q pi) || return
-    if [[ -z "$cid" ]]; then printf '项目容器不在运行，不能接回 Pi。\n' >&2; return 1; fi
+    if [[ -z "$cid" ]]; then printf '当前项目的开发容器不在运行，不能接回 Pi。\n' >&2; return 1; fi
 }
 compose_stop_if_idle() {
     local cid exec_count
@@ -37,6 +37,16 @@ compose_stop_if_idle() {
     if [[ "$exec_count" == 0 ]] && require_no_live_pi >/dev/null 2>&1; then "${CURRENT[@]}" stop pi >&2 || true; fi
 }
 finish_session() { local status=$?; trap - EXIT; session_finish compose_stop_if_idle; exit "$status"; }
+managed_projects() {
+    local ids id name
+    ids=$(docker ps -aq --filter "label=com.docker.compose.project.working_dir=$REPO" --filter 'label=com.docker.compose.service=pi') || return
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        name=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$id") || return
+        [[ "$name" =~ ^pic-r${REPO_HASH}-u${UID_VALUE}-[0-9a-f]{16}$ ]] || continue
+        printf '%s\n' "$name"
+    done <<< "$ids"
+}
 container_status() {
     local cid=$1 state code health
     if [[ -z "$cid" ]]; then printf '未创建'; return; fi
@@ -80,6 +90,20 @@ idle_action() {
 }
 action=${1:-}; [[ -n "$action" ]] || invalid; shift
 case "$action" in
+    dev-list)
+        (( $# == 0 )) || invalid
+        projects=$(managed_projects | sort -u)
+        if [[ -z "$projects" ]]; then printf '「暂无开发容器」本安装、当前用户。\n'; fi
+        while IFS= read -r name; do
+            [[ -n "$name" ]] || continue
+            cid=$("${CORE[@]}" --project-name "$name" ps -aq pi)
+            [[ -n "$cid" ]] || continue
+            directory=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}' "$cid")
+            state=$(container_status "$cid")
+            status_table '项目（宿主路径）' "${directory:-未确认}" "$state"
+            printf '\n'
+        done <<< "$projects"
+        exit 0 ;;
     dev-state)
         (( $# == 0 )) || invalid
         cid=$("${CURRENT[@]}" ps -aq pi)
@@ -116,6 +140,21 @@ case "$action" in
             docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session list
         else docker exec --user "$PIC_UID:$PIC_GID" "$cid" /usr/local/bin/pic-session close "$1"; fi
         session_lifecycle_unlock; exit 0 ;;
+    dev-remove-all)
+        (( $# == 0 )) || invalid
+        projects=$(managed_projects | sort -u); status=0
+        if [[ -z "$projects" ]]; then printf '「暂无开发容器」本安装、当前用户。\n'; fi
+        while IFS= read -r name; do
+            [[ -n "$name" ]] || continue
+            CURRENT=("${CORE[@]}" --project-name "$name")
+            cid=$("${CURRENT[@]}" ps -aq pi) || { status=1; continue; }
+            [[ -n "$cid" ]] || continue
+            directory=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/workspace"}}{{.Source}}{{end}}{{end}}' "$cid") || { status=1; continue; }
+            printf '项目（宿主路径）：%s\n' "${directory:-未确认}"
+            session_lifecycle_init "$REPO/.runtime/$name" || { printf '无法准备维护锁；未删除此容器。\n' >&2; status=1; continue; }
+            session_require_idle idle_action "${CURRENT[@]}" down --remove-orphans || status=1
+        done <<< "$projects"
+        exit "$status" ;;
     dev-remove|dev-stop)
         (( $# == 0 )) || invalid
         init_lifecycle

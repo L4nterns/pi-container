@@ -3,7 +3,8 @@ import { test } from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { pty } from "./helpers/pty.mjs";
 const down = "\x1b[B", esc = "\x1b", home = "\x1b[H";
@@ -57,11 +58,13 @@ async function fixture(t) {
     path.join(fakeBin, "docker"),
     `#!${process.execPath}
 const fs=require('node:fs'),args=process.argv.slice(2);
+const managed=JSON.parse(process.env.FAKE_MANAGED_CONTAINERS||'[]'), selected=managed.find(c=>args.includes(c.id));
+const projectName=args.includes('--project-name')?args[args.indexOf('--project-name')+1]:undefined, projectContainer=managed.find(c=>c.project===projectName);
 fs.appendFileSync(process.env.FAKE_LOG,JSON.stringify({args,workspace:process.env.PIC_WORKSPACE,uid:process.env.PIC_UID,gid:process.env.PIC_GID,groups:process.env.PIC_GROUPS,history:process.env.PIC_HISTORY_DIR,image:process.env.PIC_IMAGE,deployData:process.env.DEPLOY_DATA_DIR})+'\\n');
 if(args[0]==='image'){if(args.includes('inspect'))console.log(process.env.FAKE_BUILT_IMAGE||'sha256:built');}
-else if(args[0]==='inspect'&&args.some(a=>a.includes('.State.Status')))console.log((process.env.FAKE_CONTAINER_STATE||'running')+'\\t'+(process.env.FAKE_CONTAINER_EXIT||'0')+'\\t-');
-else if(args[0]==='inspect'&&args.some(a=>a.includes('.Mounts')))console.log(process.env.PIC_WORKSPACE);
-else if(args[0]==='inspect'&&args.some(a=>a.includes('.Config.Labels')))console.log('pic-r'+process.env.PIC_IMAGE.split(':r')[1]+'-u'+(process.env.FAKE_UID||'1000')+'-0123456789abcdef');
+else if(args[0]==='inspect'&&args.some(a=>a.includes('.State.Status')))console.log((selected?.state||process.env.FAKE_CONTAINER_STATE||'running')+'\\t'+(process.env.FAKE_CONTAINER_EXIT||'0')+'\\t-');
+else if(args[0]==='inspect'&&args.some(a=>a.includes('.Mounts')))console.log(selected?.directory||process.env.PIC_WORKSPACE);
+else if(args[0]==='inspect'&&args.some(a=>a.includes('.Config.Labels')))console.log(selected?.project||'pic-r'+process.env.PIC_IMAGE.split(':r')[1]+'-u'+(process.env.FAKE_UID||'1000')+'-0123456789abcdef');
 else if(args[0]==='inspect'&&args.includes('{{.Image}}'))console.log(process.env.FAKE_CURRENT_IMAGE||'sha256:built');
 else if(args[0]==='inspect'&&args.some(a=>a.includes('.HostConfig.RestartPolicy.Name')))console.log('当前实际重启策略：unless-stopped');
 else if(args.includes('pi')&&args.at(-1)==='--version')console.log('1.5.0');
@@ -73,13 +76,13 @@ else if(args.includes('/usr/local/bin/deploy-register'))console.log(process.env.
 else if(args.includes('build'))process.exitCode=Number(process.env.FAKE_BUILD_EXIT||0);
 else if(args.includes('up'))process.exitCode=Number(process.env.FAKE_UP_EXIT||0);
 else if(args.includes('/usr/local/bin/pic-workspace-init'))process.exitCode=Number(process.env.FAKE_WORKSPACE_EXIT||0);
-else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='count'){if(process.env.FAKE_COUNT_ERROR)process.exitCode=1;else console.log(process.env.FAKE_LIVE_PI||'0');}
+else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='count'){if(selected?.countError||process.env.FAKE_COUNT_ERROR)process.exitCode=1;else console.log(selected?.live??process.env.FAKE_LIVE_PI??'0');}
 else if(args.includes('/usr/local/bin/pic-session')&&args.at(-1)==='list'){if(process.env.FAKE_LIST_ERROR)process.exitCode=1;else process.stdout.write(process.env.FAKE_RUNNING||'');}
 else if(args.includes('logs'))console.log(process.env.FAKE_LOG_OUTPUT||'startup ready\\napplication error: synthetic diagnostic');
-else if(args[0]==='ps'&&args.includes('-aq')){if(process.env.FAKE_MANAGED)console.log('managed-container');}
+else if(args[0]==='ps'&&args.includes('-aq')){if(process.env.FAKE_MANAGED_ERROR)process.exitCode=73;else if(managed.length)for(const c of managed){if((!c.workingDir||args.includes('label=com.docker.compose.project.working_dir='+c.workingDir))&&(!c.service||args.includes('label=com.docker.compose.service='+c.service)))console.log(c.id);}else if(process.env.FAKE_MANAGED)console.log('managed-container');}
 else if(args.includes('ps')&&!args.includes('-q')&&!args.includes('-aq'))console.log('SERVICE  STATE    STATUS\\n'+(args.includes('services')?'services':'pi')+'       running  Up');
-else if(args.includes('ps')&&(args.includes('-q')||args.includes('-aq'))){if(process.env.FAKE_PS_ERROR)process.exitCode=73;else if(process.env.FAKE_NO_CONTAINER!=='1'&&(!args.includes('-q')||process.env.FAKE_CONTAINER_STATE!=='exited'))console.log('fake-container');}
-else if(args[0]==='inspect')console.log(process.env.FAKE_EXECS||'0');
+else if(args.includes('ps')&&(args.includes('-q')||args.includes('-aq'))){if(process.env.FAKE_PS_ERROR)process.exitCode=73;else if(projectContainer){if(!args.includes('-q')||projectContainer.state!=='exited')console.log(projectContainer.id);}else if(process.env.FAKE_NO_CONTAINER!=='1'&&(!args.includes('-q')||process.env.FAKE_CONTAINER_STATE!=='exited'))console.log('fake-container');}
+else if(args[0]==='inspect')console.log(selected?.execs??process.env.FAKE_EXECS??'0');
 else if(process.env.FAKE_INTERACTIVE==='1'&&(args[0]==='run'||args.includes('--dev-shell')||args.includes('--pic-session')||args.includes('attach'))){console.log('SHELL-READY');require('node:readline').createInterface({input:process.stdin}).on('line',line=>{if(line==='exit')process.exit(0);});}
 else if(args[0]==='run')process.exitCode=Number(process.env.FAKE_RUN_EXIT||0);
 else if(args.includes('exec'))process.exitCode=Number(process.env.FAKE_EXIT||0);
@@ -157,6 +160,96 @@ else if(args.includes('exec'))process.exitCode=Number(process.env.FAKE_EXIT||0);
   }
   return { root, tool, project, fakeBin, environment, calls, run, publicRun, menu };
 }
+function managedContainers(f) {
+  const hash = createHash('sha256').update(f.tool).digest('hex').slice(0, 8);
+  const prefix = `pic-r${hash}-u1000-`;
+  return [
+    { id: 'idle-container', project: prefix + '1'.repeat(16), directory: path.join(f.root, 'idle project'), state: 'exited' },
+    { id: 'busy-container', project: prefix + '0'.repeat(16), directory: path.join(f.root, 'busy project'), state: 'running' },
+  ];
+}
+test('all development containers are listed by host path within this installation and user, without initialization', async t => {
+  const f = await fixture(t), own = managedContainers(f);
+  const foreign = [
+    { id: 'other-user', project: own[0].project.replace('-u1000-', '-u2000-') },
+    { id: 'other-install', project: 'pic-rffffffff-u1000-' + '2'.repeat(16), workingDir: path.join(f.root, 'other installation') },
+    { id: 'service-container', project: own[0].project, service: 'services' },
+    { id: 'unrecognized', project: 'unrelated-project' },
+  ];
+  await fs.writeFile(path.join(f.tool, '.env'), 'invalid deployment configuration');
+  const r = await f.run(['dev-list'], { FAKE_MANAGED_CONTAINERS: JSON.stringify([...own, ...foreign]), FAKE_CONFIG_ERROR: '1' });
+  assert.equal(r.status, 0, r.stderr);
+  for (const c of own) assert(r.stdout.includes(c.directory));
+  assert.match(r.stdout, /已停止（退出码 0）/); assert.match(r.stdout, /运行中/);
+  assert.doesNotMatch(r.stdout, /pic-r|container|other-user|unrecognized|sha256:|\{"/);
+  const enumeration = r.calls.find(c => c.args[0] === 'ps');
+  assert(enumeration.args.includes(`label=com.docker.compose.project.working_dir=${f.tool}`));
+  assert(enumeration.args.includes('label=com.docker.compose.service=pi'));
+  const queried = r.calls.filter(c => c.args[0] === 'compose').map(c => c.args[c.args.indexOf('--project-name') + 1]);
+  assert.deepEqual([...new Set(queried)].sort(), own.map(c => c.project).sort());
+  assert(!r.calls.some(c => c.args.some(a => ['up', 'build', 'exec', 'config', 'down', 'prune', 'install', 'update'].includes(a))));
+  for (const dir of ['.runtime', 'data', 'services-data']) await assert.rejects(fs.access(path.join(f.tool, dir)), { code: 'ENOENT' });
+});
+
+test('batch development cleanup continues past busy or unknown state and removes only idle managed projects', async t => {
+  const f = await fixture(t);
+  for (const condition of [{ live: '1' }, { execs: '2' }, { countError: true }, { live: 'unknown' }]) {
+    const [idle, busy] = managedContainers(f); Object.assign(busy, condition);
+    const foreign = { id: 'other-user', project: idle.project.replace('-u1000-', '-u2000-') };
+    const r = await f.run(['dev-remove-all'], { FAKE_MANAGED_CONTAINERS: JSON.stringify([idle, busy, foreign]) });
+    assert.equal(r.status, 1, r.stderr);
+    const removed = r.calls.filter(c => c.args.includes('down'));
+    assert.equal(removed.length, 1);
+    assert.equal(removed[0].args[removed[0].args.indexOf('--project-name') + 1], idle.project);
+    assert(removed[0].args.includes('--remove-orphans'));
+    assert(r.stdout.includes(idle.directory) && r.stdout.includes(busy.directory));
+    assert(!r.calls.some(c => c.args.some(a => ['up', 'build', 'stop', 'prune', '--volumes', 'install', 'update'].includes(a))));
+    await assert.rejects(fs.access(path.join(f.tool, 'services-data')), { code: 'ENOENT' });
+  }
+  const allIdle = managedContainers(f).map(c => ({ ...c, state: 'exited' }));
+  const all = await f.run(['dev-remove-all'], { FAKE_MANAGED_CONTAINERS: JSON.stringify(allIdle) });
+  assert.equal(all.status, 0, all.stderr);
+  assert.deepEqual(all.calls.filter(c => c.args.includes('down')).map(c => c.args[c.args.indexOf('--project-name') + 1]).sort(), allIdle.map(c => c.project).sort());
+  for (const action of ['dev-list', 'dev-remove-all']) {
+    const empty = await f.run([action]);
+    assert.equal(empty.status, 0, empty.stderr); assert.match(empty.stdout, /暂无开发容器/);
+    assert.equal(empty.calls.length, 1);
+    const failed = await f.run([action], { FAKE_MANAGED_ERROR: '1' });
+    assert.equal(failed.status, 73);
+    assert(!failed.calls.some(c => c.args.includes('down')));
+  }
+});
+
+test('batch development cleanup respects a real host terminal lease', async t => {
+  const f = await fixture(t), [idle] = managedContainers(f);
+  const runtime = path.join(f.tool, '.runtime', idle.project); await fs.mkdir(runtime, { recursive: true });
+  const lease = path.join(runtime, 'session.test');
+  const holder = spawn('flock', ['-x', lease, 'bash', '-c', 'printf ready; read -r _'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => new Promise(resolve => { if (holder.exitCode !== null) resolve(); else { holder.once('exit', resolve); holder.stdin.end(); } }));
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('lease holder was not ready')), 2000);
+    holder.once('error', error => { clearTimeout(timer); reject(error); });
+    holder.stdout.once('data', () => { clearTimeout(timer); resolve(); });
+  });
+  const r = await f.run(['dev-remove-all'], { FAKE_MANAGED_CONTAINERS: JSON.stringify([idle]) });
+  assert.equal(r.status, 1, r.stderr); assert.match(r.stderr, /活动终端连接/);
+  assert(!r.calls.some(c => c.args.includes('down')));
+});
+
+test('development bulk maintenance is explicit in the menu and cleanup defaults to cancel', async t => {
+  const f = await fixture(t), env = { FAKE_MANAGED: '1' };
+  const listed = await f.menu([...menus(select(3), select(8)), pause, ...menus(esc, esc)], env);
+  assert.equal(listed.exitCode, 0, listed.output);
+  assert(listed.output.includes(f.project)); assert.match(listed.output, /查看全部/);
+  assert(!listed.calls.some(c => c.args.includes('down')));
+  const cancelled = await f.menu(menus(select(3), select(9), '\r', esc, esc), env);
+  assert.equal(cancelled.exitCode, 0, cancelled.output); assert.deepEqual(cancelled.calls, []);
+  assert.match(cancelled.output, /占用或状态未知的不删/);
+  const confirmed = await f.menu([...menus(select(3), select(9), select(1)), pause, ...menus(esc, esc)], env);
+  assert.equal(confirmed.exitCode, 0, confirmed.output);
+  assert.equal(confirmed.calls.filter(c => c.args.includes('down')).length, 1);
+});
+
 test("pc and pi-container share menu-only help and reject subcommands without Docker side effects", async (t) => {
   const f = await fixture(t);
   const help = await f.publicRun(["--help"]);
@@ -243,7 +336,7 @@ test("pi-container menu owns hosted processes, not native Pi conversation comman
   assert.equal(r.exitCode, 0);
   assert.doesNotMatch(r.output, /Web|浏览器|18090|恢复历史对话|开始新对话/);
   assert.match(r.output, /「Esc」退出.*「↑\/↓」选择.*「Enter」确认/);
-  assert.doesNotMatch(r.output, /退出菜单|开发终端|开发容器|返回\s{2,}/);
+  assert.doesNotMatch(r.output, /退出菜单|开发终端|项目容器|返回\s{2,}/);
   assert.doesNotMatch(r.output, /\d\) |请选择菜单中的编号/);
   assert.match(r.output, /接回 Pi.*继续原进程/);
   assert.match(r.output, /启动 Pi.*断开终端后继续运行/);
@@ -322,8 +415,8 @@ test("private dispatcher rejects unrecognized operations before Docker", async (
     ["attach", "main"],
     ["services", "up"],
     ["unknown"],
-    ["dev-list"],
-    ["dev-remove-all"],
+    ["dev-list", "unexpected"],
+    ["dev-remove-all", "unexpected"],
     ["pi-history"],
     ["pi-start", "--resume"],
     ["pi-connect", "a;id"],
@@ -704,7 +797,7 @@ test('all menus omit navigation items, align action columns, and place Esc first
   assert.equal(r.exitCode, 0, r.output);
   const common = ['查看状态', '管理终端', '查看日志', '构建镜像', '无缓存构建', '重建容器', '停止容器', '删除容器'];
   const screens = r.output.split('\x1b[?25l\x1b[?2004h');
-  for (const kind of ['项目容器', '服务容器']) {
+  for (const kind of ['开发容器', '服务容器']) {
     const frame = screens.find(s => s.includes(`\x1b[1m${kind}\x1b[0m`));
     assert(frame?.includes('> \x1b[7m查看状态'), `${kind}: first action is selected`);
     let position = 0;
@@ -713,13 +806,14 @@ test('all menus omit navigation items, align action columns, and place Esc first
   }
   for (const chunk of r.output.split(/\x1b\[\d+;1H/)) {
     const line = chunk.split('\x1b[K')[0].replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
-    if (!/^(?:  |> )(?:接回 Pi|启动 Pi|项目容器|服务容器|无缓存构建|查看状态|管理终端|查看日志|应用自启动)\s/.test(line)) continue;
+    if (!/^(?:  |> )(?:接回 Pi|启动 Pi|开发容器|服务容器|无缓存构建|查看状态|管理终端|查看日志|应用自启动|查看全部|清理空闲)\s/.test(line)) continue;
     const prefix = /^(?:  |> )\S+(?: Pi)?\s+/.exec(line)?.[0];
     assert(prefix, line);
     const width = [...prefix].reduce((n, c) => n + (c.charCodeAt(0) > 127 ? 2 : 1), 0);
     assert.equal(width, 20, line);
   }
-  assert.doesNotMatch(r.output, /退出菜单|开发终端|开发容器|查看全部|清理空闲|\x1b\[2J/);
+  assert.doesNotMatch(r.output, /退出菜单|开发终端|项目容器|\x1b\[2J/);
+  assert.match(r.output, /开发容器/); assert.match(r.output, /查看全部/); assert.match(r.output, /清理空闲/);
   assert.equal((r.output.match(/\x1b\[\?1049h/g) || []).length, 1);
   assert.equal((r.output.match(/\x1b\[\?1049l/g) || []).length, 1);
   assert.deepEqual(r.calls, []);
