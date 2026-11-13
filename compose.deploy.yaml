@@ -1,0 +1,19 @@
+services:
+  pi:
+    environment:
+      DEPLOY_PUBLIC_URL: ${DEPLOY_PUBLIC_URL:-}
+    volumes:
+      - type: bind
+        source: ${DEPLOY_CREDENTIAL_DIR:?由 pi-container 命令设置}
+        target: /run/deploy-credentials
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - default
+      - deployments
+
+networks:
+  deployments:
+    external: true
+    name: ${DEPLOY_NETWORK:?由 pi-container 命令设置}

@@ -1,0 +1,27 @@
+services:
+  pi:
+    build:
+      context: .
+    image: ${PIC_IMAGE:?由 pi-container 设置}
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: ["sleep", "infinity"]
+    tmpfs:
+      - /run/pic-ssh:rw,noexec,nosuid,nodev,mode=0700
+    environment:
+      PIC_UID: ${PIC_UID:?由 pi-container 设置}
+      PIC_GID: ${PIC_GID:?由 pi-container 设置}
+      PIC_GROUPS: ${PIC_GROUPS:?由 pi-container 设置}
+      PI_CODING_AGENT_SESSION_DIR: ${PIC_HISTORY_DIR:?由 pi-container 设置}
+    volumes:
+      - type: bind
+        source: ./data
+        target: /home/node/.pi/agent
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PIC_WORKSPACE:?由 pi-container 设置}
+        target: /workspace
+        bind:
+          create_host_path: false

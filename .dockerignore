@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+**/node_modules/
+**/__pycache__/
+*.pyc
+data/
+services-data/
+.runtime/
+.deploy-keys/
+.services.lock
+.update.lock
+node_modules/
+workspace/
+.git/

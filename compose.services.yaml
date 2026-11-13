@@ -1,0 +1,35 @@
+services:
+  services:
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+    image: ${DEPLOY_IMAGE:?由 pi-container 命令设置}
+    init: true
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "127.0.0.1:${DEPLOY_PORT:-18080}:8080"
+    volumes:
+      - type: bind
+        source: ${DEPLOY_DATA_DIR:?设置服务持久化目录}
+        target: /srv/app-services
+        bind:
+          create_host_path: false
+    networks:
+      deployments:
+        aliases: [app-services]
+    healthcheck:
+      test: ["CMD", "/opt/app-services/healthcheck.sh"]
+      start_period: 120s
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    stop_grace_period: 30s
+
+networks:
+  deployments:
+    name: ${DEPLOY_NETWORK:?由 pi-container 命令设置}

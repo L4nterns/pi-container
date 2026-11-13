@@ -1,0 +1,24 @@
+Port 2222
+ListenAddress 0.0.0.0
+HostKey /srv/app-services/ssh/ssh_host_ed25519_key
+PidFile /run/app-services/sshd.pid
+AuthorizedKeysFile /srv/app-services/control/authorized_keys
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+UsePAM no
+StrictModes yes
+AllowUsers deploy
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitUserRC no
+PermitUserEnvironment no
+Subsystem sftp internal-sftp
+MaxAuthTries 3
+LoginGraceTime 20
+LogLevel INFO

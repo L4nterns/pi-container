@@ -1,0 +1,5 @@
+{
+  "packages": [
+    { "source": "git:github.com/L4nterns/pi-provider-gateway", "name": "pi-provider-gateway" }
+  ]
+}

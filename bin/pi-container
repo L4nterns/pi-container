@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# pc and pi-container share this menu; the dispatcher is not a public CLI.
+set -euo pipefail
+SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}")
+REPO=$(cd -- "$(dirname -- "$SCRIPT")/.." && pwd -P)
+help_text() {
+    printf '%s\n' 'Pi in Container' '用法：pc 或 pi-container' \
+        '  接回 Pi：连接当前目录的原进程，任务继续。' \
+        '  启动 Pi：在当前目录的容器内托管，断开终端后继续运行。' \
+        '  项目管理：选择本安装、当前用户的项目后管理；批量清理独立。' \
+        '  服务管理：应用部署、运行与配置。' \
+        '  检查更新：更新源码与运行环境。' \
+        '  卸载：移除运行环境，保留数据。' \
+        '  启动 Pi 按需准备开发环境；服务容器只在明确启动时准备，手动停止保持停止。' \
+        '  服务管理中的「部署配置」可编辑启用状态、数据目录、HTTP 端口与公网模板。' \
+        '  对话、历史、模型和插件由原生 Pi 管理。' \
+        '「Esc」返回／取消 · 「↑/↓」选择 · 「Enter」确认；默认选中第一个可操作项。' \
+        '断开：「Ctrl+B」，再按「D」；结束：接回后在 Pi 内使用「/quit」。'
+}
+if (( $# )); then
+    if (( $# == 1 )) && [[ "$1" == --help || "$1" == -h ]]; then help_text; exit 0; fi
+    printf '请只输入「pc」或「pi-container」，在菜单中选择。\n' >&2; exit 2
+fi
+if [[ ! -t 0 || ! -t 1 ]]; then printf 'pc / pi-container 需要交互终端；请直接在终端运行。\n' >&2; exit 2; fi
+# shellcheck source=lib/menu.sh
+source "$REPO/lib/menu.sh"
+CONTROL="$REPO/scripts/control.sh"
+MENU_NOTICE=''
+SAVED_TTY=$(stty -g)
+trap 'stty "$SAVED_TTY"; menu_screen_close' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+menu_screen_open
+choose() {
+    choice=$(menu_select "$@") || return
+    MENU_NOTICE=''
+}
+confirm() { menu_confirm "$@"; }
+message() (
+    local file
+    file=$(umask 077; mktemp) || return
+    trap 'rm -f -- "$file"' EXIT
+    printf '%s\n' "$2" > "$file"
+    menu_view "$1" "$file"
+)
+# Live output and final results share the same renderer. The operation is always
+# joined, including on signals; no worker survives a return to the menu.
+command_output() (
+    local mode=$1 title=$2 file status=0
+    shift 2
+    file=$(umask 077; mktemp) || return
+    trap 'rm -f -- "$file"' EXIT
+    if menu_progress "$title" "$file" bash "$CONTROL" "$@"; then :; else status=$?; fi
+    if [[ "$mode" == view || "$mode" == result ]] || (( status )); then
+        local result='「已完成」 · '
+        [[ "$mode" != result ]] || result='「操作结果」 · '
+        (( status == 0 )) || result="「操作失败」退出码：$status · "
+        MENU_RESULT=$result MENU_VIEW_END=1 menu_view "$title" "$file"
+    fi
+    return "$status"
+)
+run() {
+    local mode=$1 title=$2; shift 2
+    if command_output "$mode" "$title" "$@"; then
+        if [[ "$mode" == change ]]; then MENU_NOTICE="「已完成」$title"; fi
+    else return "$?"; fi
+}
+# Once a real terminal is handed over, this menu invocation is finished.
+# exec also leaves all dispatcher diagnostics visible on the primary screen.
+terminal() {
+    shift
+    stty "$SAVED_TTY"
+    menu_screen_close
+    trap - EXIT
+    exec bash "$CONTROL" "$@"
+}
+# Source may already have changed even after a partial update. Replace this
+# process only after its worker/result page has returned, keeping the same
+# alternate screen and restoring input modes before the new menu takes over.
+reload_menu() {
+    stty "$SAVED_TTY"
+    export MENU_SCREEN
+    exec bash "$SCRIPT"
+}
+query_rows() (
+    local title=$1 failure=$2 temp status=0; shift 2
+    temp=$(umask 077; mktemp -d) || return
+    trap 'rm -rf -- "$temp"' EXIT
+    # Structured stdout never mixes with stderr/progress or reaches the screen.
+    # Expansion belongs to the child shell, not this menu process.
+    # shellcheck disable=SC2016
+    if menu_progress "$title" "$temp/progress" bash -c 'out=$1; shift; exec "$@" >"$out"' _ "$temp/rows" bash "$CONTROL" "$@"; then :; else status=$?; fi
+    if (( status )); then
+        [[ -s "$temp/progress" ]] || printf '%s\n' "$failure" > "$temp/progress"
+        MENU_RESULT="「查询失败」退出码：$status · " menu_view "$title" "$temp/progress"; return "$status"
+    fi
+    printf '%s' "$(<"$temp/rows")"
+)
+pick_running() {
+    local rows name attached created choice invalid=0
+    local -a names=() labels=()
+    rows=$(query_rows '运行中的 Pi' '「查询失败」请稍后重试。' pi-running) || return 1
+    if [[ -z "$rows" ]]; then message '运行中的 Pi' '「暂无运行中的 Pi」可返回选择「启动 Pi」；历史对话使用「/resume」。'; return 1; fi
+    while IFS=$'\t' read -r name attached created; do
+        if [[ ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$ || ! "$attached" =~ ^[0-9]+$ || ! "$created" =~ ^[0-9]+$ ]]; then invalid=1; break; fi
+        names+=("$name")
+        if [[ "$attached" == 0 ]]; then labels+=("$name"$'\t后台运行'); else labels+=("$name"$'\t'"$attached 个终端连接"); fi
+    done <<< "$rows"
+    if (( invalid )); then message '运行中的 Pi' '「进程状态格式错误」请稍后重试。'; return 1; fi
+    choice=$(menu_select '运行中的 Pi' "${labels[@]}") || return 1
+    printf '%s' "${names[choice]}"
+}
+uninstall_menu() {
+    local activity
+    while true; do
+        activity=$(query_rows '卸载 · 影响范围' '无法完整读取会话。' tool-remove-plan) || activity='无法完整读取会话；确认后中断本安装范围内的全部会话。'
+        if ! MENU_CONTEXT="$activity" confirm '移除运行环境？' '卸载' '确认卸载' $'影响：会中断全部会话和应用，丢弃容器可写层。\n保留：源码、配置、历史和应用持久数据。'; then return 0; fi
+        if command_output view '卸载' tool-uninstall; then return 0; fi
+        if ! confirm '操作未完成，是否重新检查范围并重试此操作？'; then return 0; fi
+    done
+}
+service_apply_configuration() {
+    local plan token context
+    while true; do
+        if ! plan=$(query_rows '服务容器 · 配置差异与影响' '无法核对部署配置。' service-config-plan); then
+            if confirm '未能核对配置，是否重新检查？'; then continue; fi
+            return 1
+        fi
+        token=${plan%%$'\n'*}
+        [[ "$token" != none ]] || return 0
+        if [[ ! "$token" =~ ^[0-9a-f]{64}$ || "$plan" != *$'\n'* ]]; then
+            message '部署配置' '重建范围不完整，请重新检查；未重建。'; return 1
+        fi
+        context=${plan#*$'\n'}
+        if ! MENU_CONTEXT="$context" confirm '是否重建服务容器？' '部署配置 · 应用变更' '确认重建' $'操作：重建服务容器以应用已保存的配置。\n影响：中断应用、SSH 与终端，容器可写层和管理 HOME 丢失。\n保留：挂载数据；不自动迁移旧目录。'; then
+            MENU_NOTICE='「暂未应用」配置保留，服务容器未重建'; return 1
+        fi
+        if command_output view '服务容器 · 重建结果' service-config-apply "$token"; then return 0; fi
+        if ! confirm '重建未完成，是否重新检查差异与影响后重试？'; then return 1; fi
+    done
+}
+service_start_menu() {
+    service_apply_configuration || return 1
+    command_output change '服务容器 · 启动容器' service-start
+}
+service_terminal_ready() {
+    local state
+    while true; do
+        if ! state=$(query_rows '服务容器 · 运行状态' '无法读取服务状态。' service-running); then
+            if confirm '状态读取失败，是否重新检查？'; then continue; fi
+            return 1
+        fi
+        [[ "$state" != running ]] || return 0
+        if ! confirm '是否启动服务后进入管理终端？' '服务管理 · 管理终端' '启动并进入' $'状态：服务容器未运行。\n操作：缺少镜像时按需构建，明确启动服务后进入终端。'; then return 1; fi
+        if service_start_menu; then return 0; fi
+        if ! confirm '启动未完成，是否重新检查并重试？'; then return 1; fi
+    done
+}
+deployment_menu() {
+    local rows revision directory port url enabled selected value data context
+    local -a values=()
+    rows=$(query_rows '服务容器 · 部署配置' '无法读取部署配置。' service-config-get) || return 0
+    mapfile -t values <<< "$rows"
+    (( ${#values[@]} >= 3 )) || { message '部署配置' '配置格式不完整，请重新打开。'; return 0; }
+    revision=${values[0]}; directory=${values[1]}; port=${values[2]}; url=${values[3]:-}
+    if [[ -n "$directory" ]]; then enabled=true; else enabled=false; directory=./services-data; fi
+    while true; do
+        local state=已禁用
+        [[ "$enabled" != true ]] || state=已启用
+        selected=$(MENU_NOTICE='先保存 .env；需要重建时另行确认；不迁移数据' menu_select '服务容器 · 部署配置' \
+            "部署状态"$'\t'"$state，Enter 切换" "数据目录"$'\t'"$directory" "HTTP 端口"$'\t'"$port" \
+            "公网模板"$'\t'"${url:-未设置}" $'保存配置\t确认后写入安装目录 .env') || return 0
+        case "$selected" in
+            0)
+                if [[ "$enabled" == true ]]; then enabled=false
+                else enabled=true; [[ -n "$directory" ]] || directory=./services-data; fi ;;
+            1)
+                if value=$(MENU_INPUT_VALUE="$directory" menu_input '部署配置 · 数据目录' '相对安装目录；安装内仅 ./services-data；留空禁用。保存不搬移旧数据'); then
+                    directory=$value
+                    if [[ -z "$value" ]]; then enabled=false; else enabled=true; fi
+                fi ;;
+            2) if value=$(MENU_INPUT_VALUE="$port" menu_input '部署配置 · HTTP 端口' '宿主回环 HTTP 端口，1024–65535；新建／明确重建服务时生效'); then port=$value; fi ;;
+            3) if value=$(MENU_INPUT_VALUE="$url" menu_input '部署配置 · 公网模板' '可留空；例如 https://app-{app}.example.com；不会配置 DNS、TLS 或路由'); then url=$value; fi ;;
+            4)
+                data=$directory; [[ "$enabled" != false ]] || data=''
+                context="部署：$state"$'\n'"数据目录：${data:-未启用；旧数据保留}"$'\n'"HTTP 端口：127.0.0.1:$port"$'\n'"公网模板：${url:-未设置}"
+                if MENU_CONTEXT="$context" confirm '保存部署配置？' '部署配置' '确认保存' $'操作：只保存 .env，不构建、启停容器或迁移数据。\n应用：已有服务需要重建时，将另行确认。'; then
+                    if command_output view '部署配置 · 保存结果' service-config-save "$revision" "$data" "$port" "$url"; then
+                        service_apply_configuration || :
+                        return 0
+                    fi
+                fi ;;
+        esac
+    done
+}
+app_menu() {
+    local rows name enabled revision choice target target_label current_label invalid
+    local -a names=() labels=() revisions=()
+    while true; do
+        names=(); labels=(); revisions=(); invalid=0
+        rows=$(query_rows '应用自启动' '「读取失败」请检查服务容器。' service-app-list) || return 0
+        if [[ -z "$rows" ]]; then message '应用自启动' '「暂无应用」请先发布应用。'; return 0; fi
+        while IFS=$'\t' read -r name enabled revision; do
+            if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ || ! "$enabled" =~ ^(true|false)$ || ! "$revision" =~ ^[0-9a-f]{64}$ ]]; then invalid=1; break; fi
+            names+=("$name"); revisions+=("$revision")
+            if [[ "$enabled" == true ]]; then labels+=("$name"$'\t已启用'); else labels+=("$name"$'\t已禁用'); fi
+        done <<< "$rows"
+        if (( invalid )); then message '应用自启动' '「应用状态格式错误」请重新打开。'; return 0; fi
+        choice=$(MENU_NOTICE='下次服务启动生效，当前进程不变' menu_select '服务容器 · 应用自启动' "${labels[@]}") || return 0
+        name=${names[choice]}; revision=${revisions[choice]}
+        if [[ ${labels[choice]} == *已启用 ]]; then current_label=已启用; else current_label=已禁用; fi
+        choice=$(MENU_NOTICE='下次服务启动生效，当前进程不变' menu_select "应用自启动 · $name" $'启用自启动\t随服务容器启动' $'禁用自启动\t保持手动启动') || continue
+        case "$choice" in 0) target=true; target_label=启用 ;; 1) target=false; target_label=禁用 ;; *) continue ;; esac
+        if confirm "${target_label}应用自启动？" "应用自启动 · $name" "确认${target_label}" "当前：$current_label"$'\n'"修改为：${target_label}自启动。"$'\n生效：下次服务启动。\n影响：只改持久化策略，当前进程不变。'; then run change '应用自启动' service-app-set "$name" "$target" "$revision" || :; fi
+    done
+}
+update_menu() {
+    local versions old target mode activity note details
+    while true; do
+        if ! versions=$(query_rows '检查更新' '「检查失败」请检查 Git 和网络连接。' tool-check); then
+            if confirm '检查失败，是否重新检查？'; then continue; fi
+            return 0
+        fi
+        IFS=$'\t' read -r old target mode <<< "$versions"
+        if [[ ! "$old" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ || ! "$target" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ || ! "$mode" =~ ^(standard|backup)$ ]]; then
+            message '检查更新' '版本信息不完整；请重新检查。'; return 0
+        fi
+        if [[ "$mode" == backup ]]; then
+            confirm '备份本地源码后更新？' '检查更新 · 本地源码' '备份后更新' $'状态：本地源码与上游不同。\n保留：现有提交及文件修改备份，不自动重放。\n操作：切换到上游 main。' || return 0
+        fi
+        if ! activity=$(query_rows "检查更新 · ${old:0:8} → ${target:0:8}" '无法完整核对范围。' tool-plan); then
+            if confirm '范围检查失败，是否重新检查？'; then continue; fi
+            return 0
+        fi
+        note='更新源码与运行环境？'
+        details='状态：发现新的源码版本。'
+        if [[ "$old" == "$target" ]]; then
+            note='仍要更新运行环境？'
+            details='状态：源码已是最新。'
+        fi
+        details+=$'\n操作：构建两种镜像，成功后替换已有受管容器。\n影响：会中断会话和应用，容器可写层丢失。\n保留：配置、历史、身份及应用持久数据。'
+        if ! MENU_CONTEXT="版本：${old:0:8} → ${target:0:8}"$'\n'"$activity" confirm "$note" '检查更新' '开始更新' "$details"; then return 0; fi
+        command_output view '检查更新 · 更新与重建' tool-update "$old" "$target" "$mode" || :
+        # A result page is still inside the menu. Reload current source after
+        # success or failure; Esc leaves the result, not the whole invocation.
+        reload_menu
+    done
+}
+project_cleanup_menu() {
+    local activity selected
+    activity=$(query_rows '批量清理 · 会话与范围' '无法完整读取会话。' dev-all-activity) || activity='会话状态读取不完整，确认后仍按本安装、当前用户范围检查。'
+    selected=$(MENU_ESCAPE_LABEL=取消 MENU_CONTEXT=$'范围：本安装、当前用户的全部开发项目。\n空闲：不打断会话，跳过占用或未知项目。\n全部：会中断范围内全部会话；挂载数据保留。\n\n'"$activity" MENU_NOTICE='选择清理范围' menu_select '项目管理 · 批量清理' '仅清理空闲' '中断后清理全部') || return 0
+    if [[ "$selected" == 1 ]]; then run view '项目管理 · 清理全部' dev-remove-all --confirmed-interruption || :
+    elif ! command_output view '项目管理 · 清理空闲' dev-remove-all; then
+        if MENU_CONTEXT="$activity" confirm '是否中断后清理全部？' '项目管理 · 清理全部' '确认清理' $'状态：仍有占用、未知状态或未完成项。\n影响：会中断范围内全部会话；挂载数据保留。'; then run view '项目管理 · 清理全部' dev-remove-all --confirmed-interruption || :; fi
+    fi
+}
+selected_project_menu() {
+    local name=$1 cid=$2 directory=$3 choice action activity details disabled_actions=''
+    local -a actions=(state shell logs stop remove) labels=(
+        $'查看状态\t所选项目的容器与运行环境' $'管理终端\t进入所选项目的 Shell'
+        $'查看日志\t所选容器最近 200 行' $'停止容器\t保留可写层与挂载数据' $'删除容器\t丢弃可写层，保留挂载数据'
+    )
+    [[ "$cid" != - ]] || disabled_actions='2 3 4'
+    while true; do
+        MENU_DISABLED="$disabled_actions" MENU_CONTEXT="项目：$directory" MENU_NOTICE='仅操作此项目；Esc 返回项目列表' choose '项目操作' "${labels[@]}" || return 0
+        action=${actions[choice]}
+        case "$action" in
+            state|logs)
+                if run view "项目操作 · ${labels[choice]%%$'\t'*}" "project-$action" "$name" "$cid" "$directory"; then :; else return 0; fi ;;
+            shell) terminal '项目操作 · 管理终端' project-shell "$name" "$cid" "$directory" ;;
+            stop|remove)
+                activity=$(query_rows '项目操作 · 会话与影响' '无法核对所选项目。' project-activity "$name" "$cid" "$directory") || return 0
+                details=$'影响：中断所选容器的全部 Pi 和终端。\n保留：挂载数据。'
+                if [[ "$action" == remove ]]; then details+=$'\n丢弃：容器可写层。'
+                else details+=$'\n容器：保持原容器及其可写层。'; fi
+                if MENU_CONTEXT="$activity" confirm "${labels[choice]%%$'\t'*}？" '项目操作' '确认操作' "$details"; then
+                    if command_output result "项目操作 · ${labels[choice]%%$'\t'*}" "project-$action" "$name" "$cid" "$directory"; then
+                        [[ "$action" != remove ]] || return 0
+                    else return 0; fi
+                fi ;;
+        esac
+    done
+}
+project_picker() {
+    local rows name cid state directory extra choice invalid
+    local -a names ids directories labels
+    while true; do
+        rows=$(query_rows '项目管理 · 项目列表' '无法读取项目列表。' project-list) || return 0
+        if [[ -z "$rows" ]]; then message '项目管理' '「暂无可管理项目」本安装、当前用户没有开发容器；请在有效项目目录运行 pc。'; return 0; fi
+        names=(); ids=(); directories=(); labels=(); invalid=0
+        while IFS=$'\t' read -r name cid state directory extra; do
+            if [[ ! "$name" =~ ^pic-r[0-9a-f]{8}-u[0-9]+-[0-9a-f]{16}$ || ! "$cid" =~ ^(-|[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127})$ || -z "$state" || "$directory" != /* || "$directory" =~ [[:cntrl:]] || -n "$extra" ]]; then invalid=1; break; fi
+            names+=("$name"); ids+=("$cid"); directories+=("$directory"); labels+=("$directory · $state")
+        done <<< "$rows"
+        if (( invalid )); then message '项目管理' '项目列表格式错误；未选择或操作项目。'; return 0; fi
+        choice=$(MENU_PATH_LIST=1 MENU_NOTICE='本安装、当前用户；←/→ 查看长路径' menu_select '项目管理 · 选择项目' "${labels[@]}") || return 0
+        selected_project_menu "${names[choice]}" "${ids[choice]}" "${directories[choice]}"
+    done
+}
+project_menu() {
+    local choice
+    while true; do
+        choose '项目管理' $'选择项目\t按宿主路径选择后管理' $'批量清理\t本安装、当前用户的全部项目' || return 0
+        case "$choice" in 0) project_picker ;; 1) project_cleanup_menu ;; esac
+    done
+}
+service_menu() {
+    local choice action activity details
+    local -a actions=(state shell logs start stop remove apps config) labels=(
+        $'查看状态\t本安装共享服务' $'管理终端\tSSH 进入共享服务' $'查看日志\t最近 200 行'
+        $'启动容器\t等待核心服务就绪' $'停止容器\t保留可写层与挂载数据' $'删除容器\t丢弃可写层，保留挂载数据'
+        $'应用自启动\t逐个应用设置' $'部署配置\t启用、数据目录、端口与公网模板'
+    )
+    while true; do
+        choose '服务管理' "${labels[@]}" || return 0
+        action=${actions[choice]}
+        case "$action" in
+            state|logs) run view "服务管理 · ${labels[choice]%%$'\t'*}" "service-$action" || : ;;
+            shell) if service_terminal_ready; then terminal '服务管理 · 管理终端' service-shell; fi ;;
+            start) if service_start_menu; then MENU_NOTICE='「已完成」服务容器 · 启动容器'; fi ;;
+            apps) app_menu ;;
+            config) deployment_menu ;;
+            stop|remove)
+                activity=$(query_rows '服务管理 · 会话与影响范围' '无法完整读取会话。' service-activity) || activity='会话状态读取不完整；确认继续仍会中断此容器的全部会话。'
+                details=$'范围：本安装共享服务，不随项目选择变化。\n影响：中断此容器的全部应用、SSH 与终端。\n保留：挂载数据。'
+                if [[ "$action" == remove ]]; then details+=$'\n丢弃：容器可写层和管理 HOME。'
+                else details+=$'\n容器：保持原容器及其可写层。'; fi
+                if MENU_CONTEXT="$activity" confirm "${labels[choice]%%$'\t'*}？" '服务管理' '确认操作' "$details"; then
+                    command_output result "服务管理 · ${labels[choice]%%$'\t'*}" "service-$action" || :
+                fi ;;
+        esac
+    done
+}
+while true; do
+    resource_state=$(bash "$CONTROL" tool-resource-state 2>/dev/null) || resource_state=unknown
+    attach_state=$(bash "$CONTROL" pi-attach-state 2>/dev/null) || attach_state=unknown
+    main_disabled=''
+    main_labels=(
+        $'接回 Pi\t当前目录，继续原进程' $'启动 Pi\t当前目录，断开后继续运行'
+        $'项目管理\t选择项目与批量清理' $'服务管理\t本安装共享服务'
+        $'检查更新\t更新源码与运行环境'
+    )
+    case "$attach_state" in
+        empty) main_disabled=0; main_labels[0]=$'接回 Pi\t暂无运行中的 Pi' ;;
+        available) ;;
+        *) main_labels[0]=$'接回 Pi\t当前目录状态未确认，选择后重试' ;;
+    esac
+    [[ "$resource_state" == empty ]] || main_labels+=($'卸载\t移除运行环境，保留数据')
+    MENU_NOTICE=${MENU_NOTICE:-$(pwd -P 2>/dev/null || printf '当前目录不可用；仍可管理已有项目')}
+    MENU_DISABLED="$main_disabled" MENU_ESCAPE_LABEL=退出 choose 'Pi in Container' "${main_labels[@]}" || exit 0
+    case "$choice" in
+        0) if name=$(pick_running); then terminal '接回 Pi' pi-connect "$name"; fi ;;
+        1) terminal '启动 Pi' pi-start ;;
+        2) project_menu ;;
+        3) service_menu ;;
+        4) update_menu ;;
+        5) uninstall_menu ;;
+    esac
+done
