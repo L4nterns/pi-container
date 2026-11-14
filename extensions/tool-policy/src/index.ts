@@ -9,7 +9,6 @@ const QUIET_NOTICE_MS = 30_000;
 interface ActiveShell {
   startedAt: number;
   lastOutputAt: number;
-  timeout: number;
 }
 
 export default function toolPolicyExtension(pi: ExtensionAPI) {
@@ -57,7 +56,7 @@ export default function toolPolicyExtension(pi: ExtensionAPI) {
   pi.on('tool_execution_start', (event, ctx) => {
     if (event.toolName !== 'bash' && event.toolName !== 'powershell') return;
     const now = Date.now();
-    active.set(event.toolCallId, { startedAt: now, lastOutputAt: now, timeout: Number(event.args?.timeout) || 0 });
+    active.set(event.toolCallId, { startedAt: now, lastOutputAt: now });
     ensureHeartbeat(ctx);
     render(ctx, true);
   });

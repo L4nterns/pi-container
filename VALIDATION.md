@@ -54,9 +54,9 @@ tmux 的外层客户端类型决定实际输出颜色。`xterm` 的基础色输�
 
 ## 本地检查环境
 
-检查环境为 Node.js 24.22.2、Pi 1.5.0、tmux 3.5a、Python 3.13.5、ShellCheck 0.10.0。Pi 版本是测试环境观测值，运行时依赖仍跟随 npm `latest`。
+检查环境为 Node.js 24.22.2、Pi 1.5.2、tmux 3.5a、Python 3.13.5、ShellCheck 0.10.0。Pi 版本是测试环境观测值，运行时依赖仍跟随 npm `latest`。
 
-- Node 测试 **172 项：169 通过、0 失败、3 跳过**；另有 **10 项 Python 自启动配置测试全部通过**。统计包含参数化子测试，重新验证时以 `npm run check` 实际输出为准。菜单／页面 PTY 的 26 项测试另行重复执行通过。新增 `tool-policy` 的 2 项测试验证默认/上限超时、长任务提示、镜像包声明与 `AGENTS.md` 环境规则；`pi-bootstrap` 测试同时验证镜像本地 `/opt/pic` 包可安装、任意本地路径仍被拒绝。
+- Node 测试 **173 项：170 通过、0 失败、3 跳过**；另有 **10 项 Python 自启动配置测试全部通过**。统计包含参数化子测试，重新验证时以 `npm run check` 实际输出为准。菜单／页面 PTY 的 26 项测试另行重复执行通过。新增 `tool-policy` 的 3 项测试验证默认／上限／小数下限超时、真实进程树终止、镜像包声明与 `AGENTS.md` 环境规则；`pi-bootstrap` 测试同时验证镜像本地 `/opt/pic` 包可安装、任意本地路径仍被拒绝。
 - Bash / POSIX sh 语法、Python AST、Node 测试和 `git diff --check` 通过。ShellCheck 0.10.0 在 CI 中执行；本地未安装时明确跳过，不冒充通过。
 - tmux 挂断回归直接对实际客户端发送 SIGHUP，不依赖 `script` 包装进程的信号转发；当前检查使用 util-linux 2.41.5，保留原 PID、断开后输出和接回断言。实时输出的门控测试等待可见标记后才允许合成任务完成，不以固定 sleep 推断可见性。
 - 部署配置、解耦与确认重建的 9 项定向测试另外分别使用临时下载、校验官方 SHA256 的 Compose 2.39.4、5.7.0 原生解析通过，不连接 Docker daemon；其余 Docker 调用仍为替身，不能据此声称实际容器验收。未把 Compose 安装到系统。

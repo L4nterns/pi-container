@@ -24,6 +24,9 @@ export function decideTimeout(requested: unknown): TimeoutDecision {
   if (value > HARD_MAX_TIMEOUT_SECONDS) {
     return { timeout: HARD_MAX_TIMEOUT_SECONDS, notice: `命令超时 ${Math.floor(value)}s 超过上限；已限制为 ${HARD_MAX_TIMEOUT_SECONDS}s` };
   }
+  if (value < 1) {
+    return { timeout: 1, notice: `命令超时 ${String(requested)}s 低于最小值；已使用 1s` };
+  }
   const timeout = Math.floor(value);
   return timeout > WARN_TIMEOUT_SECONDS
     ? { timeout, notice: `长任务：命令超时为 ${timeout}s；可按 Esc 中止` }

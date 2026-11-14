@@ -7,4 +7,4 @@ Container-level shell safety for Pi.
 - A footer status shows elapsed time and time since the last output for running shell calls, so a silent command is visibly still running instead of looking frozen.
 - The cap is deliberately not a fallback: it only bounds a single tool execution. Provider/model retries remain Pi's responsibility.
 
-The extension is loaded directly from `/opt/pic/extensions/tool-policy/src/index.ts` by `pic-entrypoint`; it is not a model provider and never changes requests.
+The image installs this package from `/opt/pic/extensions/tool-policy` through the normal Pi package bootstrap; Pi loads it like any other package extension. It is not a model provider and never changes requests.
