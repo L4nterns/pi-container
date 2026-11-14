@@ -135,14 +135,24 @@ docker exec "$DEV" pic-entrypoint --version
 # Template literals are evaluated by Node in the container, not the host Shell.
 # shellcheck disable=SC2016
 docker exec --user 12345:12345 "$DEV" node --input-type=module -e '
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 const manifest = JSON.parse(await readFile("/opt/pic/config/pi-bootstrap.json", "utf8"));
 const agent = "/home/node/.pi/agent";
 const state = JSON.parse(await readFile(`${agent}/.pic-packages.json`, "utf8"));
 const settings = JSON.parse(await readFile(`${agent}/settings.json`, "utf8"));
 if (state.version !== 1 || !Array.isArray(state.installed) || !Array.isArray(settings.packages)) throw new Error("Invalid package bootstrap state");
+const configured = async source => {
+    for (const entry of settings.packages) {
+        const value = typeof entry === "string" ? entry : entry?.source;
+        if (value === source) return true;
+        if (typeof value !== "string" || !value.startsWith(".")) continue;
+        try { if (await realpath(resolve(agent, value)) === await realpath(source)) return true; } catch {}
+    }
+    return false;
+};
 for (const { source } of manifest.packages) {
-    if (!state.installed.includes(source) || !settings.packages.some(p => (typeof p === "string" ? p : p.source) === source)) throw new Error("Default package was not installed and recorded");
+    if (!state.installed.includes(source) || !(await configured(source))) throw new Error("Default package was not installed and recorded");
 }
 '
 printf '\n--- Smoke: detached process lifetime with synthetic Pi ---\n'

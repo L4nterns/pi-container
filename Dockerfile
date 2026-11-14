@@ -31,6 +31,8 @@ COPY config/ssh-app-services.conf /etc/ssh/ssh_config.d/50-app-services.conf
 COPY DEPLOYMENT.md SECURITY.md .env.example /opt/pic/
 COPY config/nginx-apps.conf /opt/pic/config/nginx-apps.conf
 COPY skills/app-deployment/ /opt/pic/skills/app-deployment/
+COPY config/AGENTS.md /opt/pic/config/AGENTS.md
+COPY extensions/tool-policy/ /opt/pic/extensions/tool-policy/
 RUN set -eu; \
     chmod 0755 /usr/local/bin/pic-entrypoint /usr/local/bin/pic-workspace-init /usr/local/bin/pic-session; \
     printf '%s\n' 'set completion-ignore-case on' >> /etc/inputrc; \

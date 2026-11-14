@@ -19,6 +19,7 @@ export HOME=/home/node USER=node LOGNAME=node
 chown "$PIC_UID:$PIC_GID" /home/node /home/node/.pi
 find "$AGENT_DIR" -xdev \( ! -uid "$PIC_UID" -o ! -gid "$PIC_GID" \) -exec chown -h "$PIC_UID:$PIC_GID" {} +
 chmod 700 "$AGENT_DIR"
+if [ ! -e "$AGENT_DIR/AGENTS.md" ] && [ ! -L "$AGENT_DIR/AGENTS.md" ] && [ -r /opt/pic/config/AGENTS.md ]; then install -m 0600 -o "$PIC_UID" -g "$PIC_GID" /opt/pic/config/AGENTS.md "$AGENT_DIR/AGENTS.md"; fi
 if [ -d /run/deploy-credentials ]; then
     install -d -m 0711 -o 0 -g 0 /run/pic-ssh
     for name in id_ed25519 known_hosts; do

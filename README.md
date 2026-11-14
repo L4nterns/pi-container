@@ -52,9 +52,15 @@ pc
 git:github.com/L4nterns/pi-provider-gateway
 ```
 
+镜像还会安装一个本地工具策略包：
+
+```text
+/opt/pic/extensions/tool-policy
+```
+
 来源不带版本、tag 或提交 SHA，首次安装获取公开默认分支的当前内容，不需要 GitHub token。安装需要访问 GitHub 与 npm；引导器执行的安装失败时明确报错，不写完成标记，网络恢复后可重试。
 
-包和初始化标记保存在持久化的 `data/` 中。成功初始化后不重复安装；用户卸载已记录的来源后，不自动装回。开发 Shell 与接回已有进程都不执行包初始化。
+包和初始化标记保存在持久化的 `data/` 中。成功初始化后不重复安装；用户卸载已记录的来源后，不自动装回。镜像本地工具策略包也走同一标记与原生包声明。开发 Shell 与接回已有进程都不执行包初始化。
 
 引导器使用 Pi 的原生包路径解析检查已有同名安装，包括本地相对路径、绝对路径、HOME 路径和 file URL。它只读取包元数据，不加载扩展代码、不改写用户包声明、不自动迁移来源。
 
@@ -173,6 +179,16 @@ Pi 退出、崩溃或容器 / 宿主重启后，原执行状态消失。可启�
 根菜单 **卸载** 由实际受管容器、镜像及本安装标签判断，不维护第二份安装登记。卸载先列进行中的会话，再询问是否中断；明确确认后删除本安装、当前用户的开发容器、共享服务容器、受管镜像及可删除网络。保留 `data/`、`.env`、`.deploy-keys/`、应用持久目录及其中的部署脚本，也保留源码和 `pc` 入口，下次使用相应功能时按需准备环境。**容器可写层不保留。** 不带 `--volumes`，不做全局 prune；有范围外引用的共享镜像／网络不强删并保留诊断。无法可靠归属本安装的历史无标签悬空镜像不擅自删除。
 
 Gateway 安装在持久化 `data/`，不随更新、重建或卸载运行环境而更新／删除；插件更新仍由原生 Pi 在开发 Shell 执行 `pi update git:github.com/L4nterns/pi-provider-gateway`，然后 `/reload` 或正常重启。实际 Pi 版本由构建时 npm registry 决定，不承诺任意未来版本兼容。
+
+## Shell 执行边界
+
+开发镜像把工具策略扩展放在 `/opt/pic/extensions/tool-policy`，由启动引导器按 `config/pi-bootstrap.json` 的原生 `pi install` 安装并加载：
+
+- `bash` / `powershell` 未显式给 `timeout` 时使用 **120 秒**；显式值超过 **600 秒** 会提示长任务，超过 **3600 秒** 会限制到硬上限。
+- 工具运行时在 footer 显示已运行时间与无输出时长，长时间静默不再看起来像卡死。
+- 该扩展只限制单次工具执行，不做模型或 provider fallback；失败后的重试仍由 Pi 负责，账号/供应商切换仍属于上游中转（例如 Magpie）。
+
+容器首次启动时，如果 `$PI_CODING_AGENT_DIR/AGENTS.md` 不存在，会从 `/opt/pic/config/AGENTS.md` 写入一份环境规则，重点包括：不要把 `git grep` 用在 blobless/partial clone 上（会触发 lazy blob fetch 并长时间无输出），网络命令要设置超时。已有 `AGENTS.md` 不会被覆盖。
 
 ## 开发与验证
 

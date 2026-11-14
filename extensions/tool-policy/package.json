@@ -1,0 +1,12 @@
+{
+  "name": "pi-tool-policy",
+  "version": "1.0.0",
+  "description": "Bounded shell execution and visible progress for Pi in Container",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package"],
+  "pi": { "extensions": ["./src/index.ts"] },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

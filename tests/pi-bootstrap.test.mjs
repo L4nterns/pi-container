@@ -62,11 +62,15 @@ test('same-name detection uses native absolute, relative, home and file URL reso
     assert.equal(await readFile(join(s.dir,'settings.json'),'utf8'),settings);
   }
 });
-test('local package paths and malformed online sources fail before installation',async t=>{
+test('image-local package paths install; arbitrary local paths and malformed sources fail before installation',async t=>{
   const s=await setup(t);
+  await writeFile(s.manifest,JSON.stringify({packages:[{source:'/opt/pic/extensions/tool-policy',name:'pi-tool-policy'}]}));
+  assert.equal(s.run().status,0); assert.match(await readFile(s.log,'utf8'), /install \/opt\/pic\/extensions\/tool-policy/);
+  await rm(join(s.dir,'.pic-packages.json'),{force:true}); await rm(s.log,{force:true});
   for(const item of [
     {source:join(s.dir,'local-package')},
     {source:'./local-package'},
+    {source:'/opt/pic/../etc/passwd'},
     {source:'git:'},
     {source:'git:invalid source'},
     {source:'--help'},
@@ -85,7 +89,7 @@ test('failed online installation is not marked complete; empty manifest opts out
 test('pic references the public plugin repository without bundling its implementation',async()=>{
   const root=fileURLToPath(new URL('../',import.meta.url));
   const manifest=JSON.parse(await readFile(join(root,'config/pi-bootstrap.json'),'utf8'));
-  assert.deepEqual(manifest.packages,[{source:'git:github.com/L4nterns/pi-provider-gateway',name:'pi-provider-gateway'}]);
+  assert.deepEqual(manifest.packages,[{source:'git:github.com/L4nterns/pi-provider-gateway',name:'pi-provider-gateway'},{source:'/opt/pic/extensions/tool-policy',name:'pi-tool-policy'}]);
   await assert.rejects(access(join(root,'packages')));
   const image=await readFile(join(root,'Dockerfile'),'utf8');
   assert.doesNotMatch(image,/COPY\s+packages\/|\/opt\/pic\/packages\/|pi-provider-gateway\/src/);

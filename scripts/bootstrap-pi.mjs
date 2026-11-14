@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Online package bootstrap only. Provider configuration, credentials and protocols belong to Pi/extensions.
+// Package bootstrap only. Image-local packages under /opt/pic are allowed so the
+// runtime can ship a reviewed extension without fetching it at startup.
+// Provider configuration, credentials and protocols belong to Pi/extensions.
 import { readFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -12,10 +14,11 @@ async function json(path, fallback) {
   catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }
 const manifest = await json(manifestPath, { packages: [] });
+const imageLocal = (source) => /^\/opt\/pic\/[A-Za-z0-9._/-]+$/.test(source) && !source.split('/').includes('..');
 if (!Array.isArray(manifest.packages) || !manifest.packages.every(item =>
-  item && typeof item.source === 'string' && /^(npm:|git:)\S+$/.test(item.source) &&
+  item && typeof item.source === 'string' && (/^(npm:|git:)\S+$/.test(item.source) || imageLocal(item.source)) &&
   (item.name === undefined || typeof item.name === 'string' && /^[a-z0-9][a-z0-9._-]*$/.test(item.name))
-)) throw new Error('Bootstrap packages must use online npm:/git: sources');
+)) throw new Error('Bootstrap packages must use online npm:/git: sources or image-local /opt/pic paths');
 const state = await json(markerPath, { version: 1, installed: [] });
 if (state.version !== 1 || !Array.isArray(state.installed) || !state.installed.every(source => typeof source === 'string')) throw new Error('Invalid Pi bootstrap state');
 let packageManager;

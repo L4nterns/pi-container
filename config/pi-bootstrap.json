@@ -1,5 +1,6 @@
 {
   "packages": [
-    { "source": "git:github.com/L4nterns/pi-provider-gateway", "name": "pi-provider-gateway" }
+    { "source": "git:github.com/L4nterns/pi-provider-gateway", "name": "pi-provider-gateway" },
+    { "source": "/opt/pic/extensions/tool-policy", "name": "pi-tool-policy" }
   ]
 }
