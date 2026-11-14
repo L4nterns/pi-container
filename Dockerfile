@@ -35,6 +35,10 @@ COPY config/AGENTS.md /opt/pic/config/AGENTS.md
 COPY extensions/tool-policy/ /opt/pic/extensions/tool-policy/
 RUN set -eu; \
     chmod 0755 /usr/local/bin/pic-entrypoint /usr/local/bin/pic-workspace-init /usr/local/bin/pic-session; \
+    chmod 0755 /opt/pic; \
+    chmod -R a+rX /opt/pic/config /opt/pic/scripts /opt/pic/extensions /opt/pic/skills; \
+    chmod a+rX /opt/pic/package.json /opt/pic/.npmrc /opt/pic/LICENSE /opt/pic/DEPLOYMENT.md /opt/pic/SECURITY.md /opt/pic/.env.example; \
+    chmod 0644 /etc/ssh/ssh_config.d/50-app-services.conf; \
     printf '%s\n' 'set completion-ignore-case on' >> /etc/inputrc; \
     printf '%s\n' \
       "PS1='\\[\\e[2;90m\\]────────────────────────────────\\[\\e[0m\\]\\n\\[\\e[1;36m\\]\\u@\\h:\\w\\$ \\[\\e[0m\\]'" \

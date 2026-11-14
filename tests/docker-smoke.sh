@@ -12,6 +12,19 @@ IMAGE="pic-test:$$"
 SERVICE_IMAGE="app-services-test:$$"
 HOST_UID=$(id -u)
 HOST_GID=$(id -g)
+# Build from a source tree with the modes left by a fast-forward update under
+# umask 077. Dockerfile must normalize image resources for the runtime user;
+# it must not be able to rely on the host checkout happening to be world-readable.
+RESTRICTED="$TMP/restricted-source"
+mkdir -p "$RESTRICTED"
+tar -C "$REPO" \
+    --exclude='./.git' --exclude='./data' --exclude='./services-data' \
+    --exclude='./.runtime' --exclude='./.deploy-keys' --exclude='./workspace' \
+    --exclude='./node_modules' --exclude='./.env' --exclude='./.env.*' \
+    -cf - . | tar -C "$RESTRICTED" -xf -
+cp "$REPO/.env.example" "$RESTRICTED/.env.example"
+find "$RESTRICTED" -type d -exec chmod 700 {} +
+find "$RESTRICTED" -type f -exec chmod 600 {} +
 cleanup() {
     local status=$?
     trap - EXIT
@@ -49,8 +62,35 @@ cd "$REPO"
 docker compose -f compose.yaml --env-file .env.example config --quiet
 docker compose -f compose.yaml -f compose.deploy.yaml --env-file .env.example config --quiet
 docker compose -f compose.services.yaml --env-file .env.example config --quiet
-docker build --tag "$IMAGE" .
+docker build --tag "$IMAGE" "$RESTRICTED"
 docker build --file services/Dockerfile --tag "$SERVICE_IMAGE" .
+printf '\n--- Smoke: runtime-readable image resources ---\n'
+# The loop variables are evaluated by the container shell, not the host.
+# shellcheck disable=SC2016
+docker run --rm --network none --user 12345:12345 --env HOME=/tmp \
+    --env NODE_DISABLE_COMPILE_CACHE=1 --entrypoint /bin/sh "$IMAGE" -ec '
+        test -x /opt/pic
+        for directory in /opt/pic/config /opt/pic/scripts /opt/pic/extensions \
+            /opt/pic/extensions/tool-policy /opt/pic/extensions/tool-policy/src \
+            /opt/pic/skills /opt/pic/skills/app-deployment; do
+            test -x "$directory"
+            test ! -w "$directory"
+            test "$(stat -c %u:%g "$directory")" = 0:0
+        done
+        for file in /opt/pic/scripts/bootstrap-pi.mjs \
+            /opt/pic/config/pi-bootstrap.json /opt/pic/config/AGENTS.md \
+            /opt/pic/extensions/tool-policy/package.json \
+            /opt/pic/extensions/tool-policy/src/index.ts \
+            /opt/pic/skills/app-deployment/SKILL.md \
+            /opt/pic/config/tmux.conf \
+            /etc/ssh/ssh_config.d/50-app-services.conf; do
+            test -r "$file"
+            test ! -w "$file"
+            test "$(stat -c %u:%g "$file")" = 0:0
+            cat "$file" >/dev/null
+        done
+        node --check /opt/pic/scripts/bootstrap-pi.mjs
+    '
 if rejected=$(docker run --rm --security-opt no-new-privileges:true --network none "$SERVICE_IMAGE" 2>&1); then
     printf 'Misconfigured service unexpectedly allowed no-new-privileges\n' >&2; exit 1
 fi

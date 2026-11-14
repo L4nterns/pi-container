@@ -14,6 +14,28 @@ const hash = (s, n) => createHash('sha256').update(s).digest('hex').slice(0, n);
 const esc = '\x1b', select = n => '\x1b[H' + '\x1b[B'.repeat(n) + '\r';
 const hint = '「↑/↓」选择 · 「Enter」确认', page = '「PgUp/PgDn」翻页';
 const step = (...keys) => keys.map(key => [hint, key]);
+
+test('maintenance lock restores the caller umask after opening private lock files', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pc-lock-umask-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const script = String.raw`
+set -euo pipefail
+REPO=$1
+source "$2"
+umask 022
+before=$(umask)
+pc_maintenance_lock
+after=$(umask)
+[[ "$before" = 0022 ]]
+[[ "$after" = 0022 ]]
+[[ "$(stat -c %a "$REPO/.update.lock")" = 600 ]]
+[[ "$(stat -c %a "$REPO/.services.lock")" = 600 ]]
+printf 'UMASK:%s:%s\n' "$before" "$after"
+`;
+  const result = spawnSync('bash', ['-c', script, '_', root, path.join(repo, 'lib/update.sh')], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /UMASK:0022:0022/);
+});
 const docker = String.raw`
 const fs=require('node:fs');
 const a=process.argv.slice(2),s=JSON.parse(fs.readFileSync(process.env.RESOURCE_STATE,'utf8'));

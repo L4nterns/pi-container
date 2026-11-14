@@ -56,8 +56,8 @@ tmux 的外层客户端类型决定实际输出颜色。`xterm` 的基础色输�
 
 检查环境为 Node.js 24.22.2、Pi 1.5.0、tmux 3.5a、Python 3.13.5、ShellCheck 0.10.0。Pi 版本是测试环境观测值，运行时依赖仍跟随 npm `latest`。
 
-- Node 测试 **171 项：168 通过、0 失败、3 跳过**；另有 **10 项 Python 自启动配置测试全部通过**。统计包含参数化子测试，重新验证时以 `npm run check` 实际输出为准。菜单／页面 PTY 的 26 项测试另行重复执行通过。新增 `tool-policy` 的 2 项测试验证默认/上限超时、长任务提示、镜像包声明与 `AGENTS.md` 环境规则；`pi-bootstrap` 测试同时验证镜像本地 `/opt/pic` 包可安装、任意本地路径仍被拒绝。
-- Bash / POSIX sh 语法、Python AST、ShellCheck 0.10.0 和 `git diff --check` 通过。Python 与 ShellCheck 仅解压到临时工具目录，不安装系统软件包。
+- Node 测试 **172 项：169 通过、0 失败、3 跳过**；另有 **10 项 Python 自启动配置测试全部通过**。统计包含参数化子测试，重新验证时以 `npm run check` 实际输出为准。菜单／页面 PTY 的 26 项测试另行重复执行通过。新增 `tool-policy` 的 2 项测试验证默认/上限超时、长任务提示、镜像包声明与 `AGENTS.md` 环境规则；`pi-bootstrap` 测试同时验证镜像本地 `/opt/pic` 包可安装、任意本地路径仍被拒绝。
+- Bash / POSIX sh 语法、Python AST、Node 测试和 `git diff --check` 通过。ShellCheck 0.10.0 在 CI 中执行；本地未安装时明确跳过，不冒充通过。
 - tmux 挂断回归直接对实际客户端发送 SIGHUP，不依赖 `script` 包装进程的信号转发；当前检查使用 util-linux 2.41.5，保留原 PID、断开后输出和接回断言。实时输出的门控测试等待可见标记后才允许合成任务完成，不以固定 sleep 推断可见性。
 - 部署配置、解耦与确认重建的 9 项定向测试另外分别使用临时下载、校验官方 SHA256 的 Compose 2.39.4、5.7.0 原生解析通过，不连接 Docker daemon；其余 Docker 调用仍为替身，不能据此声称实际容器验收。未把 Compose 安装到系统。
 - root 隔离 chroot、root + ACL、完整服务 rootfs 三项检查在非 root 环境跳过。
@@ -76,10 +76,11 @@ tmux 的外层客户端类型决定实际输出颜色。`xterm` 的基础色输�
 1. Compose 配置有效，服务就绪、失败与超时可区分，失败时先收集诊断再清理。
 2. 非默认开发 UID/GID、账号初始化、root 工作区 ACL、符号链接边界及能力清空；宿主与容器内工作区的设备／inode 相同，同路径重建后原 bind 仍保留旧 inode，可被选定项目的 Shell 检查识别。
 3. 部署凭据只读挂载，私有副本原子写入 tmpfs；标准 SSH、PTY、SFTP、参数、标准输入和退出码。
-4. 使用真实 Pi CLI 首次安装默认在线包、再次入口不重复安装，核对原生包声明与成功标记；随后才替换合成 Pi，验证托管进程在创建它的 Docker exec 退出后仍存活，明确结束后不再计数。
-5. 非 Node 应用的系统依赖、固定非 root 账号、Supervisor 崩溃恢复、Nginx HTTP / SSE / WebSocket。
-6. 移除开发源码、停止开发容器后，服务独立运行；重建服务恢复环境、业务数据和 SSH 主机密钥。
-7. 持久禁用应用、未知域名 404；策略修改时原 PID 不变，禁用跨重建保持，重新启用只在下次启动恢复；仅删除选定测试应用。
+4. 从 `umask 077` 后全部源码为 `0600`／目录为 `0700` 的受限源树构建开发镜像，并以非 root UID 读取 bootstrap、bootstrap manifest、AGENTS、tool-policy 包与入口源码、Skill；目录可遍历，资源仍为 root 所有且不可写。
+5. 使用真实 Pi CLI 首次安装默认在线包、再次入口不重复安装，核对原生包声明与成功标记；随后才替换合成 Pi，验证托管进程在创建它的 Docker exec 退出后仍存活，明确结束后不再计数。
+6. 非 Node 应用的系统依赖、固定非 root 账号、Supervisor 崩溃恢复、Nginx HTTP / SSE / WebSocket。
+7. 移除开发源码、停止开发容器后，服务独立运行；重建服务恢复环境、业务数据和 SSH 主机密钥。
+8. 持久禁用应用、未知域名 404；策略修改时原 PID 不变，禁用跨重建保持，重新启用只在下次启动恢复；仅删除选定测试应用。
 
 该脚本由独立的实际 Docker 作业执行；命令编排、就绪失败／超时、真实包引导与合成进程替换顺序另由 Docker CLI 替身回归覆盖。
 

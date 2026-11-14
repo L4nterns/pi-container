@@ -49,10 +49,14 @@ pc_operation_unlock() {
     if [[ -n "${PC_OPERATION_FD:-}" ]]; then exec {PC_OPERATION_FD}>&-; PC_OPERATION_FD=; fi
 }
 pc_maintenance_lock() {
+    local mask
+    mask=$(umask)
     umask 077
     exec {PC_MAINTENANCE_FD}>>"$REPO/.update.lock"
+    exec {PC_SERVICES_FD}>>"$REPO/.services.lock"
+    umask "$mask"
     printf '等待其他构建／维护完成…\n'; flock -x "$PC_MAINTENANCE_FD"
-    exec {PC_SERVICES_FD}>>"$REPO/.services.lock"; flock -x "$PC_SERVICES_FD"
+    flock -x "$PC_SERVICES_FD"
 }
 pc_managed_services() {
     docker ps -aq --filter "label=com.docker.compose.project.working_dir=$REPO" \
